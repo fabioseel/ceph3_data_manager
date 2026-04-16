@@ -1,0 +1,1209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>S3 Config Explorer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <header class="top-header">
+      <h1>S3 Config Explorer</h1>
+      <button type="button" id="toggleSettingsMenu" class="settings-button secondary">⚙️ Settings</button>
+      <div id="settingsMenu" class="settings-menu hidden">
+        <form method="get" class="controls settings-form">
+          <label>
+            Bucket
+            <input name="bucket" value="{{ bucket }}" placeholder="my-config-bucket" required />
+          </label>
+          <label>
+            Prefix (optional)
+            <input name="prefix" value="{{ prefix }}" placeholder="team-a/" />
+          </label>
+          <label>
+            AWS Region (optional)
+            <input name="region" value="{{ region }}" placeholder="us-east-1" />
+          </label>
+          <label>
+            S3 Endpoint URL (optional)
+            <input name="endpoint_url" value="{{ endpoint_url }}" placeholder="https://s3.example.local" />
+          </label>
+          <label class="inline-toggle">
+            <input type="checkbox" id="autoHideConstantInSettings" checked />
+            Auto-hide constant columns
+          </label>
+          <button type="submit">Load Experiments</button>
+        </form>
+        <section class="presets">
+          <button type="button" id="presetPublic" class="secondary">Use Galvani Public Endpoint</button>
+          <button type="button" id="presetPrivate" class="secondary">Use Galvani Private Endpoint</button>
+        </section>
+      </div>
+    </header>
+    <main class="container">
+      <div id="errorBox" class="error hidden"></div>
+
+      <section id="progressSection" class="progress hidden">
+        <div class="progress-head">
+          <strong id="progressLabel">Preparing...</strong>
+          <button id="abortButton" type="button" class="secondary">Abort</button>
+        </div>
+        <progress id="progressBar" max="100" value="0"></progress>
+        <p id="progressText" class="count">0 / 0</p>
+      </section>
+
+      <section id="tableControls" class="table-controls hidden">
+        <button type="button" id="openColumnManager" class="secondary">Manage Columns</button>
+        <button type="button" id="openFilterManager" class="secondary">Manage Filters</button>
+      </section>
+
+      <section id="filtersPanel" class="panel hidden">
+        <div class="panel-head">
+          <strong>Active Filters</strong>
+          <div class="visibility-actions">
+            <button type="button" id="openAddFilter" class="secondary">Add Filter</button>
+            <button type="button" id="clearAllFilters" class="secondary">Clear All Filters</button>
+            <button type="button" id="closeFilterManager" class="secondary">Close</button>
+          </div>
+        </div>
+        <div id="filterComposer" class="filter-composer hidden">
+          <label>
+            Column
+            <select id="filterColumnSelect" onchange="updateFilterValueOptions()"></select>
+          </label>
+          <label>
+            Value
+            <input id="filterValueInput" placeholder="or select from dropdown..." list="filterValueList" />
+            <datalist id="filterValueList"></datalist>
+          </label>
+          <div class="visibility-actions">
+            <button type="button" id="applyFilter" class="secondary">Apply Filter</button>
+            <button type="button" id="cancelAddFilter" class="secondary">Cancel</button>
+          </div>
+        </div>
+        <div id="activeFiltersList" class="active-filters-list"></div>
+        <div class="filter-settings-io">
+          <div class="visibility-actions">
+            <button type="button" id="exportFilterSettings" class="secondary">Export YAML</button>
+            <button type="button" id="importFilterSettings" class="secondary">Import YAML</button>
+          </div>
+          <label>
+            Filter Settings YAML
+            <textarea
+              id="filterSettingsYaml"
+              class="yaml-area"
+              placeholder="Exported filter settings and matching experiments will appear here..."
+            ></textarea>
+          </label>
+        </div>
+      </section>
+
+      <section id="columnManager" class="column-manager hidden">
+        <div class="panel-head">
+          <strong>Column Visibility</strong>
+          <button type="button" id="closeColumnManager" class="secondary">Close</button>
+        </div>
+        <label class="column-search">
+          Search Columns
+          <input id="columnSearchInput" placeholder="find a column by name" />
+        </label>
+        <div class="search-actions">
+          <button type="button" id="hideSearchMatches" class="secondary">Hide Matches</button>
+          <button type="button" id="showSearchMatches" class="secondary">Show Matches</button>
+        </div>
+        <div class="visibility-actions">
+          <button type="button" id="showAllColumns" class="secondary">Show All Columns</button>
+          <button type="button" id="hideConstantColumns" class="secondary">Hide Constant Columns Now</button>
+        </div>
+        <div class="column-buckets">
+          <section class="column-bucket">
+            <h3>Visible</h3>
+            <div id="visibleColumnsList" class="column-list"></div>
+          </section>
+          <section class="column-bucket">
+            <h3>Hidden</h3>
+            <div id="hiddenColumnsList" class="column-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <p class="count hidden" id="countLine">Showing <span id="visibleCount"></span> of <span id="totalCount"></span> rows</p>
+
+      <div class="table-wrap hidden" id="tableWrap">
+        <table id="recordsTable">
+          <thead id="tableHead"></thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
+      <p id="emptyState">Enter a bucket and load data.</p>
+    </main>
+
+    <script>
+      const toggleSettingsMenuButton = document.getElementById("toggleSettingsMenu");
+      const settingsMenu = document.getElementById("settingsMenu");
+      const controlsForm = document.querySelector("form.controls");
+      const errorBox = document.getElementById("errorBox");
+      const progressSection = document.getElementById("progressSection");
+      const progressLabel = document.getElementById("progressLabel");
+      const progressText = document.getElementById("progressText");
+      const progressBar = document.getElementById("progressBar");
+      const abortButton = document.getElementById("abortButton");
+
+      const tableControls = document.getElementById("tableControls");
+      const openColumnManagerButton = document.getElementById("openColumnManager");
+      const openFilterManagerButton = document.getElementById("openFilterManager");
+      const autoHideConstantCheckbox = document.getElementById("autoHideConstantInSettings");
+
+      const filtersPanel = document.getElementById("filtersPanel");
+      const openAddFilterButton = document.getElementById("openAddFilter");
+      const closeFilterManagerButton = document.getElementById("closeFilterManager");
+      const clearAllFiltersButton = document.getElementById("clearAllFilters");
+      const filterComposer = document.getElementById("filterComposer");
+      const filterColumnSelect = document.getElementById("filterColumnSelect");
+      const filterValueInput = document.getElementById("filterValueInput");
+      const filterValueList = document.getElementById("filterValueList");
+      const applyFilterButton = document.getElementById("applyFilter");
+      const cancelAddFilterButton = document.getElementById("cancelAddFilter");
+      const activeFiltersList = document.getElementById("activeFiltersList");
+      const exportFilterSettingsButton = document.getElementById("exportFilterSettings");
+      const importFilterSettingsButton = document.getElementById("importFilterSettings");
+      const filterSettingsYaml = document.getElementById("filterSettingsYaml");
+
+      const columnManager = document.getElementById("columnManager");
+      const closeColumnManagerButton = document.getElementById("closeColumnManager");
+      const showAllColumnsButton = document.getElementById("showAllColumns");
+      const hideConstantColumnsButton = document.getElementById("hideConstantColumns");
+      const hideSearchMatchesButton = document.getElementById("hideSearchMatches");
+      const showSearchMatchesButton = document.getElementById("showSearchMatches");
+      const columnSearchInput = document.getElementById("columnSearchInput");
+      const visibleColumnsList = document.getElementById("visibleColumnsList");
+      const hiddenColumnsList = document.getElementById("hiddenColumnsList");
+
+      const countLine = document.getElementById("countLine");
+      const visibleCount = document.getElementById("visibleCount");
+      const totalCount = document.getElementById("totalCount");
+      const tableWrap = document.getElementById("tableWrap");
+      const tableHead = document.getElementById("tableHead");
+      const tableBody = document.getElementById("tableBody");
+      const emptyState = document.getElementById("emptyState");
+
+      const presetPublic = document.getElementById("presetPublic");
+      const presetPrivate = document.getElementById("presetPrivate");
+      const endpointInput = document.querySelector('input[name="endpoint_url"]');
+      const regionInput = document.querySelector('input[name="region"]');
+
+      let currentJobId = null;
+      let currentColumns = [];
+      let currentRows = [];
+      let baseRows = [];
+      let visibleColumns = [];
+      let columnFiltersState = {};
+      let openHeaderMenu = null;
+      let sortState = { column: null, direction: null };
+
+      function toggleSettingsMenu() {
+        settingsMenu.classList.toggle("hidden");
+      }
+
+      function closeSettingsMenu() {
+        settingsMenu.classList.add("hidden");
+      }
+
+      toggleSettingsMenuButton.addEventListener("click", toggleSettingsMenu);
+      document.addEventListener("click", (event) => {
+        if (!event.target.closest(".top-header") && !settingsMenu.classList.contains("hidden")) {
+          closeSettingsMenu();
+        }
+      });
+
+      function setError(message) {
+        if (!message) {
+          errorBox.classList.add("hidden");
+          errorBox.textContent = "";
+          return;
+        }
+        errorBox.textContent = message;
+        errorBox.classList.remove("hidden");
+      }
+
+      function setLoading(active) {
+        progressSection.classList.toggle("hidden", !active);
+        controlsForm.querySelector("button[type='submit']").disabled = active;
+      }
+
+      function updateProgress(status) {
+        const phase = status.phase || "loading";
+        const processed = Number(status.processed || 0);
+        const total = Number(status.total || 0);
+        progressLabel.textContent = phase === "starting" ? "Preparing..." : "Loading experiments...";
+        progressText.textContent = `${processed} / ${total}`;
+        progressBar.value = total > 0 ? Math.min(100, Math.floor((processed / total) * 100)) : 0;
+      }
+
+      function setColumnVisible(column, visible) {
+        if (column === "experiment_id") return;
+
+        if (visible) {
+          if (!visibleColumns.includes(column)) {
+            visibleColumns.push(column);
+          }
+        } else {
+          visibleColumns = visibleColumns.filter((item) => item !== column);
+        }
+
+        visibleColumns = currentColumns.filter((columnName) => visibleColumns.includes(columnName));
+      }
+
+      function getConstantColumns() {
+        const constants = new Set();
+        if (!currentRows.length) return constants;
+
+        currentColumns.forEach((column) => {
+          if (column === "experiment_id") return;
+          const firstValue = String(currentRows[0][column] ?? "");
+          const allSame = currentRows.every((row) => String(row[column] ?? "") === firstValue);
+          if (allSame) constants.add(column);
+        });
+
+        return constants;
+      }
+
+      function hideConstantColumns() {
+        const constants = getConstantColumns();
+        visibleColumns = currentColumns.filter((column) => column === "experiment_id" || !constants.has(column));
+      }
+
+      // Groups columns whose values are identical across every row into a single display column.
+      // Returns [{key: firstColName, columns: [col, ...]}, ...] in original column order.
+      function computeColumnMergeGroups(rows, columns) {
+        if (rows.length < 2 || columns.length <= 1) {
+          return columns.map((col) => ({ key: col, columns: [col] }));
+        }
+
+        // Build a signature for each column: null-joined concatenation of all row values.
+        const signatures = new Map();
+        columns.forEach((col) => {
+          signatures.set(col, rows.map((row) => String(row[col] ?? "")).join("\x00"));
+        });
+
+        // Group columns that share the same signature.
+        const sigToGroup = new Map();
+        columns.forEach((col) => {
+          const sig = signatures.get(col);
+          if (!sigToGroup.has(sig)) sigToGroup.set(sig, []);
+          sigToGroup.get(sig).push(col);
+        });
+
+        // Return one entry per unique signature, in original column order.
+        // The key is the shortest column name in the group — used as the primary header label.
+        const seen = new Set();
+        return columns
+          .filter((col) => {
+            const sig = signatures.get(col);
+            if (seen.has(sig)) return false;
+            seen.add(sig);
+            return true;
+          })
+          .map((col) => {
+            const groupCols = sigToGroup.get(signatures.get(col));
+            const shortest = groupCols.reduce((a, b) => (a.length <= b.length ? a : b));
+            return { key: shortest, columns: groupCols };
+          });
+      }
+
+      function setColumnFilter(column, value) {
+        const normalized = String(value || "").trim().toLowerCase();
+        if (normalized) {
+          columnFiltersState[column] = normalized;
+        } else {
+          delete columnFiltersState[column];
+        }
+        syncFilterInputs(column);
+        buildActiveFiltersPanel();
+        applyFilters();
+      }
+
+      function normalizeFilterValue(value) {
+        if (Array.isArray(value)) {
+          const normalized = value.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean);
+          return normalized.length ? normalized : null;
+        }
+
+        const normalized = String(value || "").trim().toLowerCase();
+        return normalized || null;
+      }
+
+      function formatFilterValueForInput(value) {
+        if (Array.isArray(value)) {
+          return value.join(", ");
+        }
+        return value || "";
+      }
+
+      function formatFilterValueForYaml(value) {
+        if (Array.isArray(value)) {
+          return `[${value.map((item) => yamlQuote(item)).join(", ")}]`;
+        }
+        return yamlQuote(value);
+      }
+
+      function matchesFilterValue(cellValue, filterValue) {
+        const normalizedCell = String(cellValue ?? "").toLowerCase();
+        if (Array.isArray(filterValue)) {
+          return filterValue.some((needle) => normalizedCell.includes(needle));
+        }
+        return normalizedCell.includes(filterValue);
+      }
+
+      function syncFilterInputs(column) {
+        const value = formatFilterValueForInput(columnFiltersState[column]);
+        document.querySelectorAll(`[data-filter-column="${CSS.escape(column)}"]`).forEach((element) => {
+          if (element.value !== value) {
+            element.value = value;
+          }
+        });
+      }
+
+      function getSearchMatchingColumns() {
+        const searchNeedle = (columnSearchInput.value || "").trim().toLowerCase();
+        if (!searchNeedle) return [];
+        return currentColumns.filter((column) => column.toLowerCase().includes(searchNeedle));
+      }
+
+      function buildColumnManager() {
+        const searchNeedle = (columnSearchInput.value || "").trim().toLowerCase();
+        visibleColumnsList.innerHTML = "";
+        hiddenColumnsList.innerHTML = "";
+
+        currentColumns.forEach((column) => {
+          if (searchNeedle && !column.toLowerCase().includes(searchNeedle)) {
+            return;
+          }
+
+          const isVisible = visibleColumns.includes(column);
+          const item = document.createElement("div");
+          item.className = "column-list-item";
+
+          const label = document.createElement("span");
+          label.textContent = column;
+
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "secondary";
+          button.textContent = isVisible ? "Hide" : "Show";
+          button.disabled = column === "experiment_id" && isVisible;
+          button.addEventListener("click", () => {
+            setColumnVisible(column, !isVisible);
+            buildColumnManager();
+            renderTable();
+          });
+
+          item.appendChild(label);
+          item.appendChild(button);
+
+          if (isVisible) {
+            visibleColumnsList.appendChild(item);
+          } else {
+            hiddenColumnsList.appendChild(item);
+          }
+        });
+
+        if (!visibleColumnsList.children.length) {
+          visibleColumnsList.innerHTML = '<p class="empty-mini">No visible columns match.</p>';
+        }
+        if (!hiddenColumnsList.children.length) {
+          hiddenColumnsList.innerHTML = '<p class="empty-mini">No hidden columns match.</p>';
+        }
+      }
+
+      function yamlQuote(value) {
+        return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+      }
+
+      function unquoteYamlScalar(value) {
+        const trimmed = value.trim();
+        if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+          return trimmed.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+        }
+        if (trimmed.startsWith("'") && trimmed.endsWith("'")) {
+          return trimmed.slice(1, -1);
+        }
+        return trimmed;
+      }
+
+      function getMatchingRowIndexes() {
+        const filters = Object.entries(columnFiltersState).filter(([, value]) => value);
+        const matches = [];
+
+        currentRows.forEach((row, index) => {
+          const isMatch = filters.every(([column, filterValue]) => matchesFilterValue(row[column], filterValue));
+          if (isMatch) {
+            matches.push(index);
+          }
+        });
+
+        return matches;
+      }
+
+      function getCurrentMatchingExperimentPaths() {
+        return getMatchingRowIndexes().map((index) => String(currentRows[index]?.__s3_path || "")).filter(Boolean).sort();
+      }
+
+      function parseInlineYamlList(value) {
+        const trimmed = value.trim();
+        if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+          return null;
+        }
+
+        const inner = trimmed.slice(1, -1).trim();
+        if (!inner) {
+          return [];
+        }
+
+        const items = [];
+        let current = "";
+        let quote = null;
+        for (let index = 0; index < inner.length; index += 1) {
+          const char = inner[index];
+          if ((char === '"' || char === "'") && inner[index - 1] !== "\\") {
+            if (quote === char) {
+              quote = null;
+            } else if (!quote) {
+              quote = char;
+            }
+            current += char;
+            continue;
+          }
+
+          if (char === "," && !quote) {
+            items.push(unquoteYamlScalar(current));
+            current = "";
+            continue;
+          }
+
+          current += char;
+        }
+
+        if (current.trim()) {
+          items.push(unquoteYamlScalar(current));
+        }
+
+        return items;
+      }
+
+      function exportFilterSettingsYaml() {
+        const formData = new FormData(controlsForm);
+        const bucket = String(formData.get("bucket") || "").trim();
+        const prefix = String(formData.get("prefix") || "").trim();
+        const matchingIndexes = getMatchingRowIndexes();
+        const activeFilters = Object.entries(columnFiltersState).filter(([, value]) => value);
+
+        const lines = [];
+        lines.push("bucket: " + yamlQuote(bucket));
+        lines.push("prefix: " + yamlQuote(prefix));
+        lines.push("filters:");
+        if (activeFilters.length === 0) {
+          lines.push("  {}");
+        } else {
+          activeFilters.forEach(([column, value]) => {
+            lines.push(`  ${column}: ${formatFilterValueForYaml(value)}`);
+          });
+        }
+
+        lines.push("experiments:");
+        if (matchingIndexes.length === 0) {
+          lines.push("  []");
+        } else {
+          matchingIndexes.forEach((index) => {
+            const row = currentRows[index] || {};
+            lines.push("  - " + yamlQuote(row.__s3_path || ""));
+          });
+        }
+
+        filterSettingsYaml.value = lines.join("\n");
+      }
+
+      function importFilterSettingsYaml() {
+        const text = (filterSettingsYaml.value || "").trim();
+        if (!text) {
+          setError("No YAML content to import.");
+          return;
+        }
+
+        const nextFilters = {};
+        let inFiltersSection = false;
+        let inMatchingExperimentsSection = false;
+        let currentListFilterColumn = null;
+        const importedMatchingPaths = [];
+
+        text.split(/\r?\n/).forEach((rawLine) => {
+          const trimmedLine = rawLine.trim();
+          const indent = rawLine.match(/^\s*/)?.[0].length || 0;
+          const line = trimmedLine;
+          if (!line || line.startsWith("#")) {
+            return;
+          }
+
+          if (line === "filters:") {
+            inFiltersSection = true;
+            inMatchingExperimentsSection = false;
+            currentListFilterColumn = null;
+            return;
+          }
+
+          if (line === "experiments:") {
+            inMatchingExperimentsSection = true;
+            inFiltersSection = false;
+            currentListFilterColumn = null;
+            return;
+          }
+
+          if (inFiltersSection) {
+            if (indent <= 1 && /^[a-zA-Z_][a-zA-Z0-9_]*:\s*/.test(line) && line !== "experiments:" && line !== "bucket:" && line !== "prefix:") {
+              inFiltersSection = false;
+              currentListFilterColumn = null;
+            }
+          }
+
+          if (inFiltersSection) {
+            const listItemMatch = line.match(/^-\s*(.+)$/);
+            if (currentListFilterColumn && listItemMatch) {
+              const nextValue = normalizeFilterValue(unquoteYamlScalar(listItemMatch[1]));
+              if (nextValue) {
+                if (!Array.isArray(nextFilters[currentListFilterColumn])) {
+                  nextFilters[currentListFilterColumn] = [];
+                }
+                nextFilters[currentListFilterColumn].push(nextValue);
+              }
+              return;
+            }
+
+            const filterMatch = line.match(/^([A-Za-z0-9_.\[\]-]+):\s*(.*)$/);
+            if (!filterMatch) {
+              return;
+            }
+
+            const column = filterMatch[1];
+            const rawValue = filterMatch[2];
+            if (!currentColumns.includes(column)) {
+              currentListFilterColumn = null;
+              return;
+            }
+
+            if (rawValue === "") {
+              nextFilters[column] = [];
+              currentListFilterColumn = column;
+              return;
+            }
+
+            currentListFilterColumn = null;
+            const parsedList = parseInlineYamlList(rawValue);
+            nextFilters[column] = normalizeFilterValue(parsedList ?? unquoteYamlScalar(rawValue));
+            return;
+          }
+
+          if (inMatchingExperimentsSection) {
+            const pathMatch = line.match(/^- \s*(.+)$/);
+            if (pathMatch) {
+              importedMatchingPaths.push(unquoteYamlScalar(pathMatch[1]));
+              return;
+            }
+          }
+        });
+
+        Object.keys(nextFilters).forEach((column) => {
+          const normalized = normalizeFilterValue(nextFilters[column]);
+          if (!normalized) {
+            delete nextFilters[column];
+          } else {
+            nextFilters[column] = normalized;
+          }
+        });
+
+        columnFiltersState = nextFilters;
+        sortRows();
+        buildActiveFiltersPanel();
+        renderTable();
+
+        const currentMatchingPaths = getCurrentMatchingExperimentPaths();
+        if (importedMatchingPaths.length > 0) {
+          const importedSorted = [...new Set(importedMatchingPaths)].sort();
+          const isUpToDate =
+            importedSorted.length === currentMatchingPaths.length &&
+            importedSorted.every((path, index) => path === currentMatchingPaths[index]);
+          setError(isUpToDate ? "Imported YAML matches the current experiment list." : "Imported YAML is stale: matching experiments differ from the current result.");
+        } else {
+          setError("Imported filters. No saved experiment list found to validate.");
+        }
+      }
+
+      function populateFilterColumnSelect() {
+        filterColumnSelect.innerHTML = "";
+        currentColumns.forEach((column) => {
+          const option = document.createElement("option");
+          option.value = column;
+          option.textContent = column;
+          filterColumnSelect.appendChild(option);
+        });
+      }
+
+      function updateFilterValueOptions() {
+        const selectedColumn = filterColumnSelect.value;
+        if (!selectedColumn) return;
+
+        const values = new Set();
+        currentRows.forEach((row) => {
+          const val = String(row[selectedColumn] ?? "").trim();
+          if (val) values.add(val);
+        });
+
+        const sortedValues = Array.from(values).sort();
+        filterValueList.innerHTML = "";
+        sortedValues.forEach((val) => {
+          const option = document.createElement("option");
+          option.value = val;
+          filterValueList.appendChild(option);
+        });
+      }
+
+      function buildActiveFiltersPanel() {
+        activeFiltersList.innerHTML = "";
+        const activeFilters = Object.entries(columnFiltersState);
+
+        if (!activeFilters.length) {
+          const empty = document.createElement("p");
+          empty.className = "empty-mini";
+          empty.textContent = "No active filters.";
+          activeFiltersList.appendChild(empty);
+          return;
+        }
+
+        activeFilters.forEach(([column, value]) => {
+          const chip = document.createElement("div");
+          chip.className = "filter-chip";
+
+          const text = document.createElement("span");
+          const label = Array.isArray(value) ? value.join(" | ") : value;
+          text.textContent = `${column}: ${label}`;
+
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "secondary";
+          remove.textContent = "Remove";
+          remove.addEventListener("click", () => setColumnFilter(column, ""));
+
+          chip.appendChild(text);
+          chip.appendChild(remove);
+          activeFiltersList.appendChild(chip);
+        });
+      }
+
+      function openFilterComposer(prefillColumn) {
+        populateFilterColumnSelect();
+        if (prefillColumn) {
+          filterColumnSelect.value = prefillColumn;
+          filterValueInput.value = formatFilterValueForInput(columnFiltersState[prefillColumn]);
+        } else {
+          filterValueInput.value = "";
+        }
+        updateFilterValueOptions();
+        filterComposer.classList.remove("hidden");
+        filterValueInput.focus();
+      }
+
+      function closeFilterComposer() {
+        filterComposer.classList.add("hidden");
+        filterValueInput.value = "";
+      }
+
+      // group = { key: string, columns: string[] }  (key is the representative column)
+      function createHeaderCell(group) {
+        const column = group.key;
+        const isMerged = group.columns.length > 1;
+        const mergedColumnsByLength = isMerged ? [...group.columns].sort((a, b) => a.length - b.length || a.localeCompare(b)) : [];
+
+        const th = document.createElement("th");
+        if (isMerged) {
+          th.classList.add("th-merged");
+          th.title = mergedColumnsByLength.join("\n");
+        }
+
+        const wrap = document.createElement("div");
+        wrap.className = "th-wrap";
+
+        const label = document.createElement("button");
+        label.type = "button";
+        label.className = "th-label th-sort";
+        const sortMarker = sortState.column === column ? (sortState.direction === "asc" ? " ↑" : " ↓") : "";
+        const displayName = column;
+        label.textContent = `${displayName}${sortMarker}`;
+        // For merged columns the th.title already shows the full list; for single columns keep sort tip.
+        label.title = isMerged ? mergedColumnsByLength.join("\n") : "Sort by this column";
+        label.addEventListener("click", () => {
+          if (sortState.column !== column) {
+            sortState = { column, direction: "asc" };
+          } else if (sortState.direction === "asc") {
+            sortState = { column, direction: "desc" };
+          } else {
+            sortState = { column: null, direction: null };
+          }
+          sortRows();
+          renderTable();
+        });
+
+        const menuButton = document.createElement("button");
+        menuButton.type = "button";
+        menuButton.className = "header-menu-button secondary";
+        menuButton.textContent = columnFiltersState[column] ? "Filtered" : "Menu";
+
+        const menu = document.createElement("div");
+        menu.className = "header-menu hidden";
+
+        const filterLabel = document.createElement("label");
+        filterLabel.textContent = "Filter value";
+
+        const filterInput = document.createElement("input");
+        filterInput.placeholder = "contains...";
+        filterInput.value = formatFilterValueForInput(columnFiltersState[column]);
+        filterInput.dataset.filterColumn = column;
+        filterInput.addEventListener("input", () => setColumnFilter(column, filterInput.value));
+        filterLabel.appendChild(filterInput);
+
+        const visibilityButton = document.createElement("button");
+        visibilityButton.type = "button";
+        visibilityButton.className = "secondary";
+        if (isMerged) {
+          visibilityButton.textContent = `Hide ${group.columns.length} Merged Columns`;
+          visibilityButton.addEventListener("click", () => {
+            group.columns.forEach((col) => setColumnVisible(col, false));
+            menu.classList.add("hidden");
+            openHeaderMenu = null;
+            buildColumnManager();
+            renderTable();
+          });
+        } else {
+          visibilityButton.textContent = visibleColumns.includes(column) ? "Hide Column" : "Show Column";
+          visibilityButton.disabled = column === "experiment_id";
+          visibilityButton.addEventListener("click", () => {
+            setColumnVisible(column, !visibleColumns.includes(column));
+            menu.classList.add("hidden");
+            openHeaderMenu = null;
+            buildColumnManager();
+            renderTable();
+          });
+        }
+
+        const addFilterButton = document.createElement("button");
+        addFilterButton.type = "button";
+        addFilterButton.className = "secondary";
+        addFilterButton.textContent = "Open In Filters Panel";
+        addFilterButton.addEventListener("click", () => {
+          filtersPanel.classList.remove("hidden");
+          openFilterComposer(column);
+          menu.classList.add("hidden");
+          openHeaderMenu = null;
+        });
+
+        const clearButton = document.createElement("button");
+        clearButton.type = "button";
+        clearButton.className = "secondary";
+        clearButton.textContent = "Clear Filter";
+        clearButton.addEventListener("click", () => setColumnFilter(column, ""));
+
+        menu.appendChild(filterLabel);
+        menu.appendChild(visibilityButton);
+        menu.appendChild(addFilterButton);
+        menu.appendChild(clearButton);
+
+        menuButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (openHeaderMenu && openHeaderMenu !== menu) {
+            openHeaderMenu.classList.add("hidden");
+          }
+          const shouldOpen = menu.classList.contains("hidden");
+          menu.classList.toggle("hidden", !shouldOpen);
+          openHeaderMenu = shouldOpen ? menu : null;
+        });
+
+        wrap.appendChild(label);
+        wrap.appendChild(menuButton);
+        wrap.appendChild(menu);
+        th.appendChild(wrap);
+        return th;
+      }
+
+      function shortenMiddle(value, maxLength = 100) {
+        if (value.length <= maxLength) {
+          return { text: value, truncated: false };
+        }
+
+        const startLength = Math.floor((maxLength - 3) / 2);
+        const endLength = maxLength - 3 - startLength;
+        const text = `${value.slice(0, startLength)}...${value.slice(value.length - endLength)}`;
+        return { text, truncated: true };
+      }
+
+      function compareColumnValues(a, b, column) {
+        const left = String(a[column] ?? "");
+        const right = String(b[column] ?? "");
+
+        const leftNumber = Number(left);
+        const rightNumber = Number(right);
+        const leftIsNumber = Number.isFinite(leftNumber) && left.trim() !== "";
+        const rightIsNumber = Number.isFinite(rightNumber) && right.trim() !== "";
+
+        if (leftIsNumber && rightIsNumber) {
+          if (leftNumber < rightNumber) return -1;
+          if (leftNumber > rightNumber) return 1;
+          return 0;
+        }
+
+        return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+      }
+
+      function sortRows() {
+        currentRows = [...baseRows];
+        if (!sortState.column || !sortState.direction) {
+          return;
+        }
+
+        const multiplier = sortState.direction === "asc" ? 1 : -1;
+        const sortColumn = sortState.column;
+        currentRows.sort((a, b) => compareColumnValues(a, b, sortColumn) * multiplier);
+      }
+
+      async function copyTextToClipboard(text) {
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+            return true;
+          }
+        } catch (_) {
+          // Fall back below when Clipboard API is blocked.
+        }
+
+        const temp = document.createElement("textarea");
+        temp.value = text;
+        temp.setAttribute("readonly", "");
+        temp.style.position = "absolute";
+        temp.style.left = "-9999px";
+        document.body.appendChild(temp);
+        temp.select();
+        const copied = document.execCommand("copy");
+        document.body.removeChild(temp);
+        return copied;
+      }
+
+      function showCopyStatusBubble(element, message, durationMs = 1400) {
+        let bubble = document.getElementById("copyStatusBubble");
+        if (!bubble) {
+          bubble = document.createElement("div");
+          bubble.id = "copyStatusBubble";
+          bubble.className = "copy-status-bubble";
+          document.body.appendChild(bubble);
+        }
+
+        bubble.textContent = message;
+        bubble.classList.remove("hidden");
+
+        const rect = element.getBoundingClientRect();
+        const top = Math.max(8, rect.top - 34);
+        const left = Math.min(window.innerWidth - 220, Math.max(8, rect.left));
+        bubble.style.top = `${top}px`;
+        bubble.style.left = `${left}px`;
+
+        if (bubble._hideTimer) {
+          window.clearTimeout(bubble._hideTimer);
+        }
+        bubble._hideTimer = window.setTimeout(() => {
+          bubble.classList.add("hidden");
+        }, durationMs);
+      }
+
+      function renderTable() {
+        tableHead.innerHTML = "";
+        tableBody.innerHTML = "";
+
+        const activeColumns = visibleColumns.length ? visibleColumns : ["experiment_id"];
+        // Merge columns that are identical across all experiments.
+        const groups = computeColumnMergeGroups(baseRows, activeColumns);
+
+        const headRow = document.createElement("tr");
+        groups.forEach((group) => headRow.appendChild(createHeaderCell(group)));
+        tableHead.appendChild(headRow);
+
+        currentRows.forEach((rowObj, index) => {
+          const row = document.createElement("tr");
+          row.dataset.rowIndex = String(index);
+
+          groups.forEach((group) => {
+            const td = document.createElement("td");
+            const rawText = String(rowObj[group.key] ?? "");
+            const shortened = shortenMiddle(rawText);
+            const valueSpan = document.createElement("span");
+            valueSpan.className = "cell-value";
+            valueSpan.textContent = shortened.text;
+            const isExperimentIdGroup = group.columns.includes("experiment_id");
+            if (isExperimentIdGroup) {
+              const fullPath = String(rowObj.__s3_path || rawText);
+              valueSpan.title = fullPath;
+              valueSpan.addEventListener("dblclick", async () => {
+                const copied = await copyTextToClipboard(fullPath);
+                if (copied) {
+                  showCopyStatusBubble(valueSpan, "Copied full path");
+                } else {
+                  showCopyStatusBubble(valueSpan, "Could not copy path");
+                }
+              });
+            } else if (shortened.truncated) {
+              valueSpan.title = rawText;
+            }
+            td.appendChild(valueSpan);
+            row.appendChild(td);
+          });
+
+          tableBody.appendChild(row);
+        });
+
+        applyFilters();
+      }
+
+      function applyFilters() {
+        if (!currentRows.length) {
+          visibleCount.textContent = "0";
+          return;
+        }
+
+        const rows = Array.from(tableBody.querySelectorAll("tr"));
+        const matchingIndexes = new Set(getMatchingRowIndexes());
+        let shown = 0;
+
+        rows.forEach((row) => {
+          const rowIndex = Number(row.dataset.rowIndex || "0");
+          const matches = matchingIndexes.has(rowIndex);
+          row.style.display = matches ? "" : "none";
+          if (matches) shown += 1;
+        });
+
+        visibleCount.textContent = String(shown);
+      }
+
+      function initializeData(columns, rows) {
+        currentColumns = columns;
+        baseRows = [...rows];
+        currentRows = [...rows];
+        visibleColumns = [...columns];
+        columnFiltersState = {};
+        sortState = { column: null, direction: null };
+
+        closeSettingsMenu();
+
+        if (autoHideConstantCheckbox.checked) {
+          hideConstantColumns();
+        }
+
+        totalCount.textContent = String(rows.length);
+        tableWrap.classList.toggle("hidden", rows.length === 0);
+        tableControls.classList.toggle("hidden", rows.length === 0);
+        filtersPanel.classList.toggle("hidden", rows.length === 0);
+        countLine.classList.toggle("hidden", rows.length === 0);
+        columnManager.classList.add("hidden");
+        closeFilterComposer();
+        emptyState.textContent = rows.length === 0 ? "No experiments found." : "";
+
+        if (rows.length === 0) {
+          return;
+        }
+
+        sortRows();
+        populateFilterColumnSelect();
+        buildColumnManager();
+        buildActiveFiltersPanel();
+        renderTable();
+      }
+
+      async function pollStatus(jobId) {
+        while (true) {
+          const response = await fetch(`/api/status/${jobId}`);
+          const status = await response.json();
+
+          if (!response.ok) {
+            throw new Error(status.error || "Could not read load status");
+          }
+
+          updateProgress(status);
+
+          if (status.status === "done") {
+            setLoading(false);
+            currentJobId = null;
+            initializeData(status.columns || [], status.rows || []);
+            setError("");
+            return;
+          }
+
+          if (status.status === "error") {
+            setLoading(false);
+            currentJobId = null;
+            setError(status.error || "Loading failed");
+            return;
+          }
+
+          if (status.status === "cancelled") {
+            setLoading(false);
+            currentJobId = null;
+            setError(status.error || "Loading cancelled");
+            return;
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 600));
+        }
+      }
+
+      controlsForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        setError("");
+        setLoading(true);
+        emptyState.textContent = "Loading...";
+
+        const formData = new FormData(controlsForm);
+        const payload = {
+          bucket: String(formData.get("bucket") || "").trim(),
+          prefix: String(formData.get("prefix") || "").trim(),
+          region: String(formData.get("region") || "").trim(),
+          endpoint_url: String(formData.get("endpoint_url") || "").trim(),
+        };
+
+        try {
+          const response = await fetch("/api/load", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const data = await response.json();
+
+          if (!response.ok) {
+            throw new Error(data.error || "Could not start loading");
+          }
+
+          currentJobId = data.job_id;
+          await pollStatus(currentJobId);
+        } catch (err) {
+          setLoading(false);
+          currentJobId = null;
+          setError(String(err));
+        }
+      });
+
+      abortButton.addEventListener("click", async () => {
+        if (!currentJobId) return;
+        try {
+          await fetch(`/api/abort/${currentJobId}`, { method: "POST" });
+        } catch (_) {
+          setError("Abort request failed");
+        }
+      });
+
+      openColumnManagerButton.addEventListener("click", () => {
+        buildColumnManager();
+        columnManager.classList.toggle("hidden");
+      });
+
+      closeColumnManagerButton.addEventListener("click", () => {
+        columnManager.classList.add("hidden");
+      });
+
+      openFilterManagerButton.addEventListener("click", () => {
+        filtersPanel.classList.toggle("hidden");
+      });
+
+      closeFilterManagerButton.addEventListener("click", () => {
+        filtersPanel.classList.add("hidden");
+        closeFilterComposer();
+      });
+
+      showAllColumnsButton.addEventListener("click", () => {
+        visibleColumns = [...currentColumns];
+        buildColumnManager();
+        renderTable();
+      });
+
+      hideConstantColumnsButton.addEventListener("click", () => {
+        hideConstantColumns();
+        buildColumnManager();
+        renderTable();
+      });
+
+      hideSearchMatchesButton.addEventListener("click", () => {
+        const matching = getSearchMatchingColumns();
+        matching.forEach((column) => setColumnVisible(column, false));
+        buildColumnManager();
+        renderTable();
+      });
+
+      showSearchMatchesButton.addEventListener("click", () => {
+        const matching = getSearchMatchingColumns();
+        matching.forEach((column) => setColumnVisible(column, true));
+        buildColumnManager();
+        renderTable();
+      });
+
+      clearAllFiltersButton.addEventListener("click", () => {
+        columnFiltersState = {};
+        buildActiveFiltersPanel();
+        renderTable();
+      });
+
+      columnSearchInput.addEventListener("input", buildColumnManager);
+
+      openAddFilterButton.addEventListener("click", () => openFilterComposer());
+      cancelAddFilterButton.addEventListener("click", closeFilterComposer);
+
+      applyFilterButton.addEventListener("click", () => {
+        setColumnFilter(filterColumnSelect.value, filterValueInput.value);
+        closeFilterComposer();
+      });
+
+      exportFilterSettingsButton.addEventListener("click", exportFilterSettingsYaml);
+      importFilterSettingsButton.addEventListener("click", importFilterSettingsYaml);
+
+      autoHideConstantCheckbox.addEventListener("change", () => {
+        if (autoHideConstantCheckbox.checked) {
+          hideConstantColumns();
+        } else {
+          visibleColumns = [...currentColumns];
+        }
+        buildColumnManager();
+        renderTable();
+      });
+
+      if (presetPublic && endpointInput) {
+        presetPublic.addEventListener("click", () => {
+          endpointInput.value = "https://s3.mlcloud.uni-tuebingen.de";
+          if (regionInput && !regionInput.value.trim()) {
+            regionInput.value = "us-east-1";
+          }
+        });
+      }
+
+      if (presetPrivate && endpointInput) {
+        presetPrivate.addEventListener("click", () => {
+          endpointInput.value = "http://192.168.213.99";
+          if (regionInput && !regionInput.value.trim()) {
+            regionInput.value = "us-east-1";
+          }
+        });
+      }
+
+      document.addEventListener("click", (event) => {
+        if (openHeaderMenu && !openHeaderMenu.closest(".th-wrap")?.contains(event.target)) {
+          openHeaderMenu.classList.add("hidden");
+          openHeaderMenu = null;
+        }
+      });
+
+      if (new URLSearchParams(window.location.search).get("bucket")) {
+        controlsForm.requestSubmit();
+      }
+    </script>
+  </body>
+</html>
