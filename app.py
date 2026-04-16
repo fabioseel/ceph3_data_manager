@@ -1,4 +1,6 @@
 import os
+import json
+import re
 from datetime import datetime
 from configparser import ConfigParser
 from dataclasses import dataclass
@@ -96,6 +98,12 @@ def read_yaml_from_s3(s3_client: Any, bucket: str, key: str) -> Any:
     response = s3_client.get_object(Bucket=bucket, Key=key)
     body = response["Body"].read().decode("utf-8")
     return yaml.safe_load(body)
+
+
+def read_json_from_s3(s3_client: Any, bucket: str, key: str) -> Any:
+    response = s3_client.get_object(Bucket=bucket, Key=key)
+    body = response["Body"].read().decode("utf-8")
+    return json.loads(body)
 
 
 def normalize_override(override: str) -> str:
@@ -241,6 +249,66 @@ def merge_experiment_config(
     return flatten_dict({"value": resolved})
 
 
+def extract_git_hash_value(s3_client: Any, bucket: str, experiment_id: str) -> str:
+    base = experiment_id.rstrip("/")
+    config: Any = None
+    candidate_keys = [
+        f"{base}/train_dir/default_experiment/config.json",
+        f"{base}/default_experiment/config.json",
+        f"{base}/config.json",
+    ]
+
+    for config_key in candidate_keys:
+        try:
+            config = read_json_from_s3(s3_client, bucket=bucket, key=config_key)
+            break
+        except botocore.exceptions.ClientError:
+            continue
+        except Exception:
+            continue
+
+    if config is None:
+        return ""
+
+    if not isinstance(config, dict):
+        return ""
+
+    git = config.get("git") if isinstance(config.get("git"), dict) else {}
+    git_hash = str(config.get("git_hash") or git.get("hash") or git.get("commit") or "").strip()
+
+    diff_text = str(config.get("git_diff") or git.get("diff") or "").strip()
+    dirty_flag = config.get("git_dirty")
+    if dirty_flag is None:
+        dirty_flag = git.get("dirty")
+
+    if not git_hash:
+        return ""
+    if diff_text or dirty_flag is True:
+        return f"{git_hash}!"
+    return git_hash
+
+
+def extract_last_analysis_step(s3_client: Any, bucket: str, experiment_id: str) -> str:
+    prefix = f"{experiment_id.rstrip('/')}/data/analyses/"
+    paginator = s3_client.get_paginator("list_objects_v2")
+    max_step: int | None = None
+
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for item in page.get("Contents", []):
+            key = str(item.get("Key", ""))
+            filename = key.rsplit("/", 1)[-1]
+            match = re.match(r"^receptive_fields_epoch_(\d+)\.npz$", filename)
+            if not match:
+                continue
+            step = int(match.group(1))
+            if max_step is None or step > max_step:
+                max_step = step
+
+    if max_step is None:
+        return ""
+    return str(max_step)
+
+
 def load_experiment_rows(
     bucket: str,
     prefix: str = "",
@@ -257,7 +325,7 @@ def load_experiment_rows(
         total = len(experiments)
         processed = 0
         rows: list[dict[str, str]] = []
-        all_columns: set[str] = {"experiment_id"}
+        all_columns: set[str] = {"experiment_id", "git_hash", "last_analysis_step"}
 
         if progress_callback:
             progress_callback("loading", processed, total)
@@ -270,6 +338,8 @@ def load_experiment_rows(
             row: dict[str, str] = {
                 "experiment_id": display_experiment_id(experiment_id),
                 "__s3_path": experiment_id,
+                "git_hash": "",
+                "last_analysis_step": "",
             }
             try:
                 flat = merge_experiment_config(s3_client, bucket=bucket, files=files)
@@ -279,6 +349,9 @@ def load_experiment_rows(
             except Exception as file_error:
                 row["__error__"] = f"Could not merge config: {file_error}"
                 all_columns.add("__error__")
+
+            row["git_hash"] = extract_git_hash_value(s3_client, bucket=bucket, experiment_id=experiment_id)
+            row["last_analysis_step"] = extract_last_analysis_step(s3_client, bucket=bucket, experiment_id=experiment_id)
 
             rows.append(row)
             processed += 1

@@ -212,6 +212,35 @@
       let openHeaderMenu = null;
       let filterRequestToken = 0;
       let sortState = { column: null, direction: null };
+      const HIDDEN_COLUMNS_STORAGE_KEY = "ceph3_data_manager.hidden_columns";
+
+      function loadPersistedHiddenColumns() {
+        try {
+          const raw = window.localStorage.getItem(HIDDEN_COLUMNS_STORAGE_KEY);
+          if (!raw) return new Set();
+          const parsed = JSON.parse(raw);
+          if (!Array.isArray(parsed)) return new Set();
+          return new Set(parsed.map((item) => String(item)));
+        } catch (_) {
+          return new Set();
+        }
+      }
+
+      function persistColumnPreferences() {
+        try {
+          const hidden = currentColumns.filter((column) => column !== "experiment_id" && !visibleColumns.includes(column));
+          window.localStorage.setItem(HIDDEN_COLUMNS_STORAGE_KEY, JSON.stringify(hidden));
+          // Cleanup from older versions that persisted visible columns.
+          window.localStorage.removeItem("ceph3_data_manager.visible_columns");
+        } catch (_) {
+          // Ignore localStorage errors (e.g. private mode / quota).
+        }
+      }
+
+      function applyPersistedHiddenColumns() {
+        const hiddenSet = loadPersistedHiddenColumns();
+        visibleColumns = currentColumns.filter((column) => column === "experiment_id" || !hiddenSet.has(column));
+      }
 
       function toggleSettingsMenu() {
         settingsMenu.classList.toggle("hidden");
@@ -262,6 +291,8 @@
         } else {
           visibleColumns = visibleColumns.filter((item) => item !== column);
         }
+
+        persistColumnPreferences();
       }
 
       function getConstantColumns() {
@@ -280,7 +311,9 @@
 
       function hideConstantColumns() {
         const constants = getConstantColumns();
-        visibleColumns = currentColumns.filter((column) => column === "experiment_id" || !constants.has(column));
+        // Hide constants on top of current visibility so persisted hidden choices remain hidden.
+        visibleColumns = visibleColumns.filter((column) => column === "experiment_id" || !constants.has(column));
+        persistColumnPreferences();
       }
 
       // Groups columns whose values are identical across every row into a single display column.
@@ -329,10 +362,9 @@
             continue;
           }
 
-          if (!Number.isFinite(Number(rawValue))) {
-            return false;
+          if (Number.isFinite(Number(rawValue))) {
+            sawNumericValue = true;
           }
-          sawNumericValue = true;
         }
 
         return sawNumericValue;
@@ -558,6 +590,7 @@
             if (idx !== -1) visibleColumns.splice(idx, 1);
           });
           visibleColumns.splice(dstIdx, 0, ...srcGroup.columns);
+          persistColumnPreferences();
           dragSrcColumn = null;
           buildColumnManager();
           renderTable();
@@ -1062,7 +1095,11 @@
         const displayName = column;
         label.textContent = `${displayName}${sortMarker}`;
         // For merged columns the th.title already shows the full list; for single columns keep sort tip.
-        label.title = isMerged ? mergedColumnsByLength.join("\n") : "Sort by this column";
+        let labelTitle = isMerged ? mergedColumnsByLength.join("\n") : "Sort by this column";
+        if (column === "git_hash") {
+          labelTitle += "\nHint: trailing ! means git.diff is not empty.";
+        }
+        label.title = labelTitle;
         label.addEventListener("click", () => {
           if (sortState.column !== column) {
             sortState = { column, direction: "asc" };
@@ -1381,7 +1418,7 @@
         baseRows = [...rows];
         currentRows = [...rows];
         currentMatchingIndexes = rows.map((_, index) => index);
-        visibleColumns = [...columns];
+        applyPersistedHiddenColumns();
         columnFiltersState = {};
         sortState = { column: null, direction: null };
 
@@ -1525,6 +1562,7 @@
 
       showAllColumnsButton.addEventListener("click", () => {
         visibleColumns = [...currentColumns];
+        persistColumnPreferences();
         buildColumnManager();
         renderTable();
       });
@@ -1576,6 +1614,7 @@
           hideConstantColumns();
         } else {
           visibleColumns = [...currentColumns];
+          persistColumnPreferences();
         }
         buildColumnManager();
         renderTable();

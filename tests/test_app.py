@@ -288,3 +288,86 @@ def test_api_filter_rejects_invalid_filter_specs() -> None:
     finally:
         with app_module.JOBS_LOCK:
             app_module.JOBS.pop(job_id, None)
+
+
+def test_extract_git_hash_value_marks_dirty_diff(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_read_json(_s3_client: Any, bucket: str, key: str) -> Any:
+        _ = (bucket, key)
+        return {"git": {"hash": "abc123", "diff": "changed line"}}
+
+    monkeypatch.setattr(app_module, "read_json_from_s3", fake_read_json)
+
+    value = app_module.extract_git_hash_value(object(), "berens0", "runs/exp-1")
+    assert value == "abc123!"
+
+
+def test_extract_git_hash_value_reads_top_level_git_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_read_json(_s3_client: Any, bucket: str, key: str) -> Any:
+        _ = bucket
+        assert key == "runs/exp-1/train_dir/default_experiment/config.json"
+        return {"git_hash": "440d351d2a81e97726f821bc86ba6b8c470d9d2c"}
+
+    monkeypatch.setattr(app_module, "read_json_from_s3", fake_read_json)
+
+    value = app_module.extract_git_hash_value(object(), "berens0", "runs/exp-1")
+    assert value == "440d351d2a81e97726f821bc86ba6b8c470d9d2c"
+
+
+def test_extract_git_hash_value_returns_plain_hash_when_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_read_json(_s3_client: Any, bucket: str, key: str) -> Any:
+        _ = (bucket, key)
+        return {"git": {"hash": "def456", "diff": ""}}
+
+    monkeypatch.setattr(app_module, "read_json_from_s3", fake_read_json)
+
+    value = app_module.extract_git_hash_value(object(), "berens0", "runs/exp-1")
+    assert value == "def456"
+
+
+def test_extract_git_hash_value_falls_back_to_root_config_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_read_json(_s3_client: Any, bucket: str, key: str) -> Any:
+        _ = bucket
+        calls.append(key)
+        if key in {
+            "runs/exp-1/train_dir/default_experiment/config.json",
+            "runs/exp-1/default_experiment/config.json",
+        }:
+            raise botocore.exceptions.ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        if key == "runs/exp-1/config.json":
+            return {"git_hash": "xyz789", "git_diff": "dirty"}
+        return {}
+
+    monkeypatch.setattr(app_module, "read_json_from_s3", fake_read_json)
+
+    value = app_module.extract_git_hash_value(object(), "berens0", "runs/exp-1")
+    assert value == "xyz789!"
+    assert calls == [
+        "runs/exp-1/train_dir/default_experiment/config.json",
+        "runs/exp-1/default_experiment/config.json",
+        "runs/exp-1/config.json",
+    ]
+
+
+def test_extract_last_analysis_step_returns_max_epoch() -> None:
+    class FakePaginator:
+        def paginate(self, **kwargs: Any) -> list[dict[str, Any]]:
+            _ = kwargs
+            return [
+                {
+                    "Contents": [
+                        {"Key": "runs/exp-1/data/analyses/receptive_fields_epoch_10.npz"},
+                        {"Key": "runs/exp-1/data/analyses/receptive_fields_epoch_100.npz"},
+                        {"Key": "runs/exp-1/data/analyses/other_file.txt"},
+                    ]
+                }
+            ]
+
+    class FakeS3Client:
+        def get_paginator(self, operation_name: str) -> FakePaginator:
+            assert operation_name == "list_objects_v2"
+            return FakePaginator()
+
+    value = app_module.extract_last_analysis_step(FakeS3Client(), "berens0", "runs/exp-1")
+    assert value == "100"
