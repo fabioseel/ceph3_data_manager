@@ -167,15 +167,11 @@ def register_interpolation_resolvers(config: Any) -> None:
     def hydra_resolver(path: str) -> Any:
         return OmegaConf.select(config, f"hydra.{path}")
 
-    def now_resolver(fmt: str = "%Y-%m-%d") -> str:
-        return datetime.now().strftime(fmt)
-
     def eval_resolver(expr: str) -> Any:
         safe_globals = {"__builtins__": {}}
         return eval(expr, safe_globals, {})  # noqa: S307
 
     OmegaConf.register_new_resolver("hydra", hydra_resolver, replace=True)
-    OmegaConf.register_new_resolver("now", now_resolver, replace=True)
     OmegaConf.register_new_resolver("eval", eval_resolver, replace=True)
 
 
@@ -236,6 +232,9 @@ def merge_experiment_config(
                 overrides_obj = OmegaConf.from_dotlist(normalized)
 
     merged = OmegaConf.merge(config_obj, hydra_obj, overrides_obj)
+    # run_name can be used by interpolations in config/hydra fields.
+    # Force it to the stable experiment display name before resolving.
+    merged["run_name"] = display_experiment_id(files.experiment_id)
     register_interpolation_resolvers(merged)
 
     try:
@@ -325,7 +324,7 @@ def load_experiment_rows(
         total = len(experiments)
         processed = 0
         rows: list[dict[str, str]] = []
-        all_columns: set[str] = {"experiment_id", "git_hash", "last_analysis_step"}
+        all_columns: set[str] = {"run_name", "git_hash", "last_analysis_step"}
 
         if progress_callback:
             progress_callback("loading", processed, total)
@@ -336,7 +335,7 @@ def load_experiment_rows(
 
             files = experiments[experiment_id]
             row: dict[str, str] = {
-                "experiment_id": display_experiment_id(experiment_id),
+                "run_name": display_experiment_id(experiment_id),
                 "__s3_path": experiment_id,
                 "git_hash": "",
                 "last_analysis_step": "",
@@ -344,11 +343,17 @@ def load_experiment_rows(
             try:
                 flat = merge_experiment_config(s3_client, bucket=bucket, files=files)
                 for key, value in flat.items():
+                    if key in {"run_name", "experiment_id"}:
+                        # Keep UI identifier stable: never show interpolated run_name from config.
+                        continue
                     row[key] = str(value)
                     all_columns.add(key)
             except Exception as file_error:
                 row["__error__"] = f"Could not merge config: {file_error}"
                 all_columns.add("__error__")
+
+            # Use shortened experiment path as canonical run_name for display/filtering.
+            row["run_name"] = display_experiment_id(experiment_id)
 
             row["git_hash"] = extract_git_hash_value(s3_client, bucket=bucket, experiment_id=experiment_id)
             row["last_analysis_step"] = extract_last_analysis_step(s3_client, bucket=bucket, experiment_id=experiment_id)
@@ -358,7 +363,7 @@ def load_experiment_rows(
             if progress_callback:
                 progress_callback("loading", processed, total)
 
-        ordered_columns = ["experiment_id"] + sorted(c for c in all_columns if c != "experiment_id")
+        ordered_columns = ["run_name"] + sorted(c for c in all_columns if c != "run_name")
         return rows, ordered_columns, None
 
     except botocore.exceptions.BotoCoreError as error:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import botocore
 import pytest
 
 import app as app_module
@@ -228,8 +229,8 @@ def test_merge_experiment_config_handles_hydra_yaml_with_root_hydra(monkeypatch:
 
     flat = app_module.merge_experiment_config(s3_client=object(), bucket="berens0", files=files)
 
-    assert flat["run_name"].startswith("run_")
-    assert flat["hydra.runtime.output_dir"].startswith("outputs/run_")
+    assert flat["run_name"] == "exp-1"
+    assert flat["hydra.runtime.output_dir"] == "outputs/exp-1"
 
 
 def test_api_filter_returns_matching_indexes_in_requested_order() -> None:
@@ -371,3 +372,33 @@ def test_extract_last_analysis_step_returns_max_epoch() -> None:
 
     value = app_module.extract_last_analysis_step(FakeS3Client(), "berens0", "runs/exp-1")
     assert value == "100"
+
+
+def test_load_experiment_rows_uses_short_path_as_run_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    files = app_module.ExperimentConfigFiles(
+        experiment_id="runs/group-a/run_2025-11-24-14-54-53-497055",
+        config_key="runs/group-a/run_2025-11-24-14-54-53-497055/.hydra/config.yaml",
+    )
+
+    monkeypatch.setattr(app_module, "create_s3_client", lambda region=None, endpoint_url=None: object())
+    monkeypatch.setattr(app_module, "iter_yaml_keys", lambda s3_client, bucket, prefix="": [files.config_key])
+    monkeypatch.setattr(
+        app_module,
+        "collect_experiment_files",
+        lambda keys: {files.experiment_id: files},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "merge_experiment_config",
+        lambda s3_client, bucket, files: {"run_name": "run_${now:%Y}", "trainer.epochs": 5},
+    )
+    monkeypatch.setattr(app_module, "extract_git_hash_value", lambda s3_client, bucket, experiment_id: "")
+    monkeypatch.setattr(app_module, "extract_last_analysis_step", lambda s3_client, bucket, experiment_id: "")
+
+    rows, columns, error = app_module.load_experiment_rows(bucket="berens0", prefix="runs/")
+
+    assert error is None
+    assert columns[0] == "run_name"
+    assert "experiment_id" not in columns
+    assert rows[0]["run_name"] == "run_2025-11-24-14-54-53-497055"
+    assert rows[0]["trainer.epochs"] == "5"

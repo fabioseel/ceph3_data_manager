@@ -214,6 +214,10 @@
       let sortState = { column: null, direction: null };
       const HIDDEN_COLUMNS_STORAGE_KEY = "ceph3_data_manager.hidden_columns";
 
+      function getPrimaryIdColumn() {
+        return currentColumns.includes("run_name") ? "run_name" : "experiment_id";
+      }
+
       function loadPersistedHiddenColumns() {
         try {
           const raw = window.localStorage.getItem(HIDDEN_COLUMNS_STORAGE_KEY);
@@ -228,7 +232,8 @@
 
       function persistColumnPreferences() {
         try {
-          const hidden = currentColumns.filter((column) => column !== "experiment_id" && !visibleColumns.includes(column));
+          const primaryIdColumn = getPrimaryIdColumn();
+          const hidden = currentColumns.filter((column) => column !== primaryIdColumn && !visibleColumns.includes(column));
           window.localStorage.setItem(HIDDEN_COLUMNS_STORAGE_KEY, JSON.stringify(hidden));
           // Cleanup from older versions that persisted visible columns.
           window.localStorage.removeItem("ceph3_data_manager.visible_columns");
@@ -238,8 +243,9 @@
       }
 
       function applyPersistedHiddenColumns() {
+        const primaryIdColumn = getPrimaryIdColumn();
         const hiddenSet = loadPersistedHiddenColumns();
-        visibleColumns = currentColumns.filter((column) => column === "experiment_id" || !hiddenSet.has(column));
+        visibleColumns = currentColumns.filter((column) => column === primaryIdColumn || !hiddenSet.has(column));
       }
 
       function toggleSettingsMenu() {
@@ -282,7 +288,8 @@
       }
 
       function setColumnVisible(column, visible) {
-        if (column === "experiment_id") return;
+        const primaryIdColumn = getPrimaryIdColumn();
+        if (column === primaryIdColumn) return;
 
         if (visible) {
           if (!visibleColumns.includes(column)) {
@@ -299,8 +306,10 @@
         const constants = new Set();
         if (!currentRows.length) return constants;
 
+        const primaryIdColumn = getPrimaryIdColumn();
+
         currentColumns.forEach((column) => {
-          if (column === "experiment_id") return;
+          if (column === primaryIdColumn) return;
           const firstValue = String(currentRows[0][column] ?? "");
           const allSame = currentRows.every((row) => String(row[column] ?? "") === firstValue);
           if (allSame) constants.add(column);
@@ -311,8 +320,9 @@
 
       function hideConstantColumns() {
         const constants = getConstantColumns();
+        const primaryIdColumn = getPrimaryIdColumn();
         // Hide constants on top of current visibility so persisted hidden choices remain hidden.
-        visibleColumns = visibleColumns.filter((column) => column === "experiment_id" || !constants.has(column));
+        visibleColumns = visibleColumns.filter((column) => column === primaryIdColumn || !constants.has(column));
         persistColumnPreferences();
       }
 
@@ -642,7 +652,7 @@
           button.type = "button";
           button.className = "secondary";
           button.textContent = "Hide";
-          button.disabled = group.columns.includes("experiment_id");
+          button.disabled = group.columns.includes(getPrimaryIdColumn());
           button.addEventListener("click", () => {
             group.columns.forEach((col) => setColumnVisible(col, false));
             buildColumnManager();
@@ -1068,7 +1078,7 @@
 
       function closeFilterComposer() {
         filterComposer.classList.add("hidden");
-        populateOperatorSelect(filterOperatorSelect, filterColumnSelect.value || currentColumns[0] || "experiment_id", "contains");
+        populateOperatorSelect(filterOperatorSelect, filterColumnSelect.value || currentColumns[0] || getPrimaryIdColumn(), "contains");
         filterValueInput.value = "";
         updateFilterValueInputState(filterValueInput, filterOperatorSelect.value, true);
       }
@@ -1165,7 +1175,7 @@
           });
         } else {
           visibilityButton.textContent = visibleColumns.includes(column) ? "Hide Column" : "Show Column";
-          visibilityButton.disabled = column === "experiment_id";
+          visibilityButton.disabled = column === getPrimaryIdColumn();
           visibilityButton.addEventListener("click", () => {
             setColumnVisible(column, !visibleColumns.includes(column));
             menu.classList.add("hidden");
@@ -1311,7 +1321,7 @@
         // Keep filter column ordering in sync with current visibility state.
         populateFilterColumnSelect();
 
-        const activeColumns = visibleColumns.length ? visibleColumns : ["experiment_id"];
+        const activeColumns = visibleColumns.length ? visibleColumns : [getPrimaryIdColumn()];
         // Merge columns that are identical across all experiments.
         const groups = computeColumnMergeGroups(baseRows, activeColumns);
 
@@ -1330,8 +1340,8 @@
             const valueSpan = document.createElement("span");
             valueSpan.className = "cell-value";
             valueSpan.textContent = shortened.text;
-            const isExperimentIdGroup = group.columns.includes("experiment_id");
-            if (isExperimentIdGroup) {
+            const isPrimaryIdGroup = group.columns.includes(getPrimaryIdColumn());
+            if (isPrimaryIdGroup) {
               const fullPath = String(rowObj.__s3_path || rawText);
               valueSpan.title = fullPath;
               valueSpan.addEventListener("dblclick", async () => {
