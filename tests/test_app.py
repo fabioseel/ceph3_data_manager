@@ -230,3 +230,61 @@ def test_merge_experiment_config_handles_hydra_yaml_with_root_hydra(monkeypatch:
 
     assert flat["run_name"].startswith("run_")
     assert flat["hydra.runtime.output_dir"].startswith("outputs/run_")
+
+
+def test_api_filter_returns_matching_indexes_in_requested_order() -> None:
+    job_id = "job-filter-ordered"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "status": "done",
+            "rows": [
+                {"experiment_id": "run-1", "__s3_path": "runs/exp-1", "score": "0.81", "notes": ""},
+                {"experiment_id": "run-2", "__s3_path": "runs/exp-2", "score": "0.95", "notes": "kept"},
+                {"experiment_id": "run-3", "__s3_path": "runs/exp-3", "score": "1.20", "notes": ""},
+            ],
+        }
+
+    try:
+        client = app_module.app.test_client()
+        response = client.post(
+            "/api/filter",
+            json={
+                "job_id": job_id,
+                "filters": [
+                    {"column": "score", "operator": "gt", "value": "0.9"},
+                    {"column": "notes", "operator": "missing"},
+                ],
+                "ordered_paths": ["runs/exp-3", "runs/exp-2", "runs/exp-1"],
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.get_json() == {"matching_indexes": [0]}
+    finally:
+        with app_module.JOBS_LOCK:
+            app_module.JOBS.pop(job_id, None)
+
+
+def test_api_filter_rejects_invalid_filter_specs() -> None:
+    job_id = "job-filter-invalid"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "status": "done",
+            "rows": [{"experiment_id": "run-1", "__s3_path": "runs/exp-1", "score": "0.81"}],
+        }
+
+    try:
+        client = app_module.app.test_client()
+        response = client.post(
+            "/api/filter",
+            json={
+                "job_id": job_id,
+                "filters": [{"column": "score", "operator": "sideways", "value": "1"}],
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.get_json() == {"error": "Unsupported filter operator: sideways"}
+    finally:
+        with app_module.JOBS_LOCK:
+            app_module.JOBS.pop(job_id, None)

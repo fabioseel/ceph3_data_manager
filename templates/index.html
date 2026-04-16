@@ -72,6 +72,13 @@
             <select id="filterColumnSelect" onchange="updateFilterValueOptions()"></select>
           </label>
           <label>
+            Operator
+            <select id="filterOperatorSelect">
+              <option value="contains">Contains</option>
+              <option value="missing">Is Missing</option>
+            </select>
+          </label>
+          <label>
             Value
             <input id="filterValueInput" placeholder="or select from dropdown..." list="filterValueList" />
             <datalist id="filterValueList"></datalist>
@@ -160,6 +167,7 @@
       const clearAllFiltersButton = document.getElementById("clearAllFilters");
       const filterComposer = document.getElementById("filterComposer");
       const filterColumnSelect = document.getElementById("filterColumnSelect");
+      const filterOperatorSelect = document.getElementById("filterOperatorSelect");
       const filterValueInput = document.getElementById("filterValueInput");
       const filterValueList = document.getElementById("filterValueList");
       const applyFilterButton = document.getElementById("applyFilter");
@@ -193,12 +201,16 @@
       const regionInput = document.querySelector('input[name="region"]');
 
       let currentJobId = null;
+      let activeDatasetJobId = null;
       let currentColumns = [];
+      let dragSrcColumn = null;
       let currentRows = [];
+      let currentMatchingIndexes = [];
       let baseRows = [];
       let visibleColumns = [];
       let columnFiltersState = {};
       let openHeaderMenu = null;
+      let filterRequestToken = 0;
       let sortState = { column: null, direction: null };
 
       function toggleSettingsMenu() {
@@ -250,8 +262,6 @@
         } else {
           visibleColumns = visibleColumns.filter((item) => item !== column);
         }
-
-        visibleColumns = currentColumns.filter((columnName) => visibleColumns.includes(columnName));
       }
 
       function getConstantColumns() {
@@ -311,57 +321,208 @@
           });
       }
 
-      function setColumnFilter(column, value) {
-        const normalized = String(value || "").trim().toLowerCase();
-        if (normalized) {
-          columnFiltersState[column] = normalized;
+      function columnHasNumericValues(column) {
+        let sawNumericValue = false;
+        for (const row of baseRows) {
+          const rawValue = String(row[column] ?? "").trim();
+          if (!rawValue) {
+            continue;
+          }
+
+          if (!Number.isFinite(Number(rawValue))) {
+            return false;
+          }
+          sawNumericValue = true;
+        }
+
+        return sawNumericValue;
+      }
+
+      function getFilterOperatorOptions(column) {
+        const options = [
+          { value: "contains", label: "Contains" },
+          { value: "not_contains", label: "Does Not Contain" },
+          { value: "missing", label: "Is Missing" },
+        ];
+
+        if (columnHasNumericValues(column)) {
+          options.push({ value: "lt", label: "Smaller Than" });
+          options.push({ value: "gt", label: "Larger Than" });
+        }
+
+        return options;
+      }
+
+      function populateOperatorSelect(selectElement, column, requestedOperator = "contains") {
+        const options = getFilterOperatorOptions(column);
+        const allowedOperators = new Set(options.map((option) => option.value));
+        const selectedOperator = allowedOperators.has(requestedOperator) ? requestedOperator : "contains";
+
+        selectElement.innerHTML = "";
+        options.forEach((option) => {
+          const optionElement = document.createElement("option");
+          optionElement.value = option.value;
+          optionElement.textContent = option.label;
+          optionElement.selected = option.value === selectedOperator;
+          selectElement.appendChild(optionElement);
+        });
+
+        return selectedOperator;
+      }
+
+      function updateFilterValueInputState(inputElement, operator, useSuggestions = false) {
+        const requiresNoValue = operator === "missing";
+        inputElement.disabled = requiresNoValue;
+
+        if (requiresNoValue) {
+          inputElement.value = "";
+          inputElement.placeholder = "no value required";
+          inputElement.removeAttribute("list");
+          return;
+        }
+
+        if (operator === "contains" || operator === "not_contains") {
+          inputElement.placeholder = operator === "contains" ? "or select from dropdown..." : "must not contain...";
+          if (useSuggestions && operator === "contains") {
+            inputElement.setAttribute("list", "filterValueList");
+          } else {
+            inputElement.removeAttribute("list");
+          }
+          return;
+        }
+
+        inputElement.placeholder = "enter a number";
+        inputElement.removeAttribute("list");
+      }
+
+      function normalizeContainsFilterValue(value) {
+        const values = (Array.isArray(value) ? value : String(value || "").split(","))
+          .map((item) => String(item || "").trim().toLowerCase())
+          .filter(Boolean);
+
+        if (!values.length) {
+          return null;
+        }
+
+        return values.length === 1 ? values[0] : values;
+      }
+
+      function normalizeFilterDefinition(operator, value) {
+        const normalizedOperator = String(operator || "contains").trim().toLowerCase();
+        if (normalizedOperator === "missing") {
+          return { operator: "missing" };
+        }
+
+        if (normalizedOperator === "contains" || normalizedOperator === "not_contains") {
+          const normalizedValue = normalizeContainsFilterValue(value);
+          return normalizedValue ? { operator: normalizedOperator, value: normalizedValue } : null;
+        }
+
+        if (normalizedOperator === "lt" || normalizedOperator === "gt") {
+          const numericText = String(value || "").trim();
+          if (!numericText) {
+            return null;
+          }
+          if (!Number.isFinite(Number(numericText))) {
+            return { invalid: "Numeric filters require a valid number." };
+          }
+          return { operator: normalizedOperator, value: numericText };
+        }
+
+        return { invalid: `Unsupported filter operator: ${normalizedOperator}` };
+      }
+
+      function setColumnFilter(column, operator, value) {
+        const nextFilter = normalizeFilterDefinition(operator, value);
+        if (nextFilter && nextFilter.invalid) {
+          setError(nextFilter.invalid);
+          return false;
+        }
+
+        if (nextFilter) {
+          columnFiltersState[column] = nextFilter;
         } else {
           delete columnFiltersState[column];
         }
+
         syncFilterInputs(column);
         buildActiveFiltersPanel();
         applyFilters();
+        return true;
       }
 
-      function normalizeFilterValue(value) {
-        if (Array.isArray(value)) {
-          const normalized = value.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean);
-          return normalized.length ? normalized : null;
+      function formatFilterValueForInput(filterState) {
+        if (!filterState || filterState.operator === "missing") {
+          return "";
         }
-
-        const normalized = String(value || "").trim().toLowerCase();
-        return normalized || null;
+        if (Array.isArray(filterState.value)) {
+          return filterState.value.join(", ");
+        }
+        return String(filterState.value || "");
       }
 
-      function formatFilterValueForInput(value) {
-        if (Array.isArray(value)) {
-          return value.join(", ");
+      function formatFilterLabel(filterState) {
+        if (!filterState) {
+          return "";
         }
-        return value || "";
+        if (filterState.operator === "missing") {
+          return "is missing";
+        }
+        if (filterState.operator === "not_contains") {
+          if (Array.isArray(filterState.value)) return `not: ${filterState.value.join(" | ")}`;
+          return `not: ${filterState.value}`;
+        }
+        if (filterState.operator === "lt") {
+          return `< ${filterState.value}`;
+        }
+        if (filterState.operator === "gt") {
+          return `> ${filterState.value}`;
+        }
+        if (Array.isArray(filterState.value)) {
+          return filterState.value.join(" | ");
+        }
+        return String(filterState.value || "");
       }
 
-      function formatFilterValueForYaml(value) {
-        if (Array.isArray(value)) {
-          return `[${value.map((item) => yamlQuote(item)).join(", ")}]`;
+      function formatFilterValueForYaml(filterState) {
+        if (filterState.operator === "missing") {
+          return "{ op: missing }";
         }
-        return yamlQuote(value);
-      }
-
-      function matchesFilterValue(cellValue, filterValue) {
-        const normalizedCell = String(cellValue ?? "").toLowerCase();
-        if (Array.isArray(filterValue)) {
-          return filterValue.some((needle) => normalizedCell.includes(needle));
+        if (filterState.operator === "not_contains" || filterState.operator === "lt" || filterState.operator === "gt") {
+          const v = Array.isArray(filterState.value)
+            ? `[${filterState.value.map((item) => yamlQuote(item)).join(", ")}]`
+            : yamlQuote(filterState.value);
+          return `{ op: ${filterState.operator}, value: ${v} }`;
         }
-        return normalizedCell.includes(filterValue);
+        if (Array.isArray(filterState.value)) {
+          return `[${filterState.value.map((item) => yamlQuote(item)).join(", ")}]`;
+        }
+        return yamlQuote(filterState.value);
       }
 
       function syncFilterInputs(column) {
-        const value = formatFilterValueForInput(columnFiltersState[column]);
+        const filterState = columnFiltersState[column];
+        const nextOperator = filterState?.operator || "contains";
+        const nextValue = formatFilterValueForInput(filterState);
+
+        document.querySelectorAll(`[data-filter-operator-column="${CSS.escape(column)}"]`).forEach((element) => {
+          populateOperatorSelect(element, column, nextOperator);
+        });
+
         document.querySelectorAll(`[data-filter-column="${CSS.escape(column)}"]`).forEach((element) => {
-          if (element.value !== value) {
-            element.value = value;
+          updateFilterValueInputState(element, nextOperator, false);
+          if (element.value !== nextValue) {
+            element.value = nextValue;
           }
         });
+
+        if (filterColumnSelect.value === column) {
+          populateOperatorSelect(filterOperatorSelect, column, nextOperator);
+          updateFilterValueInputState(filterValueInput, nextOperator, true);
+          if (filterValueInput.value !== nextValue) {
+            filterValueInput.value = nextValue;
+          }
+        }
       }
 
       function getSearchMatchingColumns() {
@@ -375,12 +536,76 @@
         visibleColumnsList.innerHTML = "";
         hiddenColumnsList.innerHTML = "";
 
-        currentColumns.forEach((column) => {
-          if (searchNeedle && !column.toLowerCase().includes(searchNeedle)) {
-            return;
-          }
+        // Render visible columns in visibleColumns order (not currentColumns order)
+        const orderedVisible = visibleColumns.filter(
+          (column) => !searchNeedle || column.toLowerCase().includes(searchNeedle)
+        );
+        const hiddenCols = currentColumns.filter(
+          (column) => !visibleColumns.includes(column) && (!searchNeedle || column.toLowerCase().includes(searchNeedle))
+        );
 
-          const isVisible = visibleColumns.includes(column);
+        orderedVisible.forEach((column) => {
+          const item = document.createElement("div");
+          item.className = "column-list-item";
+          item.draggable = true;
+          item.dataset.column = column;
+
+          const handle = document.createElement("span");
+          handle.className = "drag-handle";
+          handle.textContent = "⠿";
+          handle.title = "Drag to reorder";
+
+          const label = document.createElement("span");
+          label.textContent = column;
+
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "secondary";
+          button.textContent = "Hide";
+          button.disabled = column === "experiment_id";
+          button.addEventListener("click", () => {
+            setColumnVisible(column, false);
+            buildColumnManager();
+            renderTable();
+          });
+
+          item.addEventListener("dragstart", (e) => {
+            dragSrcColumn = column;
+            e.dataTransfer.effectAllowed = "move";
+          });
+          item.addEventListener("dragover", (e) => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+            item.classList.add("drag-over");
+          });
+          item.addEventListener("dragleave", () => {
+            item.classList.remove("drag-over");
+          });
+          item.addEventListener("drop", (e) => {
+            e.preventDefault();
+            item.classList.remove("drag-over");
+            if (!dragSrcColumn || dragSrcColumn === column) return;
+            const srcIdx = visibleColumns.indexOf(dragSrcColumn);
+            const dstIdx = visibleColumns.indexOf(column);
+            if (srcIdx === -1 || dstIdx === -1) return;
+            visibleColumns.splice(srcIdx, 1);
+            visibleColumns.splice(dstIdx, 0, dragSrcColumn);
+            dragSrcColumn = null;
+            buildColumnManager();
+            renderTable();
+          });
+          item.addEventListener("dragend", () => {
+            dragSrcColumn = null;
+            document.querySelectorAll(".column-list-item.drag-over").forEach((el) => el.classList.remove("drag-over"));
+          });
+
+          item.appendChild(handle);
+          item.appendChild(label);
+          item.appendChild(button);
+          visibleColumnsList.appendChild(item);
+        });
+
+        hiddenCols.forEach((column) => {
           const item = document.createElement("div");
           item.className = "column-list-item";
 
@@ -390,22 +615,16 @@
           const button = document.createElement("button");
           button.type = "button";
           button.className = "secondary";
-          button.textContent = isVisible ? "Hide" : "Show";
-          button.disabled = column === "experiment_id" && isVisible;
+          button.textContent = "Show";
           button.addEventListener("click", () => {
-            setColumnVisible(column, !isVisible);
+            setColumnVisible(column, true);
             buildColumnManager();
             renderTable();
           });
 
           item.appendChild(label);
           item.appendChild(button);
-
-          if (isVisible) {
-            visibleColumnsList.appendChild(item);
-          } else {
-            hiddenColumnsList.appendChild(item);
-          }
+          hiddenColumnsList.appendChild(item);
         });
 
         if (!visibleColumnsList.children.length) {
@@ -431,22 +650,89 @@
         return trimmed;
       }
 
-      function getMatchingRowIndexes() {
-        const filters = Object.entries(columnFiltersState).filter(([, value]) => value);
-        const matches = [];
-
-        currentRows.forEach((row, index) => {
-          const isMatch = filters.every(([column, filterValue]) => matchesFilterValue(row[column], filterValue));
-          if (isMatch) {
-            matches.push(index);
+      function serializeFiltersForApi() {
+        return Object.entries(columnFiltersState).map(([column, filterState]) => {
+          const payload = { column, operator: filterState.operator };
+          if (filterState.operator !== "missing") {
+            payload.value = filterState.value;
           }
+          return payload;
         });
-
-        return matches;
       }
 
       function getCurrentMatchingExperimentPaths() {
-        return getMatchingRowIndexes().map((index) => String(currentRows[index]?.__s3_path || "")).filter(Boolean).sort();
+        return currentMatchingIndexes.map((index) => String(currentRows[index]?.__s3_path || "")).filter(Boolean).sort();
+      }
+
+      function splitInlineYamlItems(value) {
+        const parts = [];
+        let current = "";
+        let quote = null;
+        let depth = 0;
+
+        for (let index = 0; index < value.length; index += 1) {
+          const char = value[index];
+          if ((char === '"' || char === "'") && value[index - 1] !== "\\") {
+            if (quote === char) {
+              quote = null;
+            } else if (!quote) {
+              quote = char;
+            }
+            current += char;
+            continue;
+          }
+
+          if (!quote && (char === "[" || char === "{")) {
+            depth += 1;
+          } else if (!quote && (char === "]" || char === "}")) {
+            depth -= 1;
+          }
+
+          if (char === "," && !quote && depth === 0) {
+            parts.push(current.trim());
+            current = "";
+            continue;
+          }
+
+          current += char;
+        }
+
+        if (current.trim()) {
+          parts.push(current.trim());
+        }
+
+        return parts;
+      }
+
+      function findTopLevelColon(value) {
+        let quote = null;
+        let depth = 0;
+        for (let index = 0; index < value.length; index += 1) {
+          const char = value[index];
+          if ((char === '"' || char === "'") && value[index - 1] !== "\\") {
+            if (quote === char) {
+              quote = null;
+            } else if (!quote) {
+              quote = char;
+            }
+            continue;
+          }
+
+          if (!quote && (char === "[" || char === "{")) {
+            depth += 1;
+            continue;
+          }
+          if (!quote && (char === "]" || char === "}")) {
+            depth -= 1;
+            continue;
+          }
+
+          if (char === ":" && !quote && depth === 0) {
+            return index;
+          }
+        }
+
+        return -1;
       }
 
       function parseInlineYamlList(value) {
@@ -460,42 +746,38 @@
           return [];
         }
 
-        const items = [];
-        let current = "";
-        let quote = null;
-        for (let index = 0; index < inner.length; index += 1) {
-          const char = inner[index];
-          if ((char === '"' || char === "'") && inner[index - 1] !== "\\") {
-            if (quote === char) {
-              quote = null;
-            } else if (!quote) {
-              quote = char;
-            }
-            current += char;
-            continue;
-          }
+        return splitInlineYamlItems(inner).map((item) => unquoteYamlScalar(item));
+      }
 
-          if (char === "," && !quote) {
-            items.push(unquoteYamlScalar(current));
-            current = "";
-            continue;
-          }
-
-          current += char;
+      function parseInlineYamlMapping(value) {
+        const trimmed = value.trim();
+        if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+          return null;
         }
 
-        if (current.trim()) {
-          items.push(unquoteYamlScalar(current));
+        const inner = trimmed.slice(1, -1).trim();
+        if (!inner) {
+          return {};
         }
 
-        return items;
+        const result = {};
+        splitInlineYamlItems(inner).forEach((entry) => {
+          const colonIndex = findTopLevelColon(entry);
+          if (colonIndex === -1) {
+            return;
+          }
+
+          const key = unquoteYamlScalar(entry.slice(0, colonIndex));
+          const rawValue = entry.slice(colonIndex + 1).trim();
+          result[key] = parseInlineYamlList(rawValue) ?? unquoteYamlScalar(rawValue);
+        });
+        return result;
       }
 
       function exportFilterSettingsYaml() {
         const formData = new FormData(controlsForm);
         const bucket = String(formData.get("bucket") || "").trim();
         const prefix = String(formData.get("prefix") || "").trim();
-        const matchingIndexes = getMatchingRowIndexes();
         const activeFilters = Object.entries(columnFiltersState).filter(([, value]) => value);
 
         const lines = [];
@@ -503,18 +785,18 @@
         lines.push("prefix: " + yamlQuote(prefix));
         lines.push("filters:");
         if (activeFilters.length === 0) {
-          lines.push("  {}");
+          lines.push("  []");
         } else {
           activeFilters.forEach(([column, value]) => {
-            lines.push(`  ${column}: ${formatFilterValueForYaml(value)}`);
+            lines.push(`  - ${column}: ${formatFilterValueForYaml(value)}`);
           });
         }
 
-        lines.push("experiments:");
-        if (matchingIndexes.length === 0) {
+        lines.push("matching_experiments:");
+        if (currentMatchingIndexes.length === 0) {
           lines.push("  []");
         } else {
-          matchingIndexes.forEach((index) => {
+          currentMatchingIndexes.forEach((index) => {
             const row = currentRows[index] || {};
             lines.push("  - " + yamlQuote(row.__s3_path || ""));
           });
@@ -523,7 +805,7 @@
         filterSettingsYaml.value = lines.join("\n");
       }
 
-      function importFilterSettingsYaml() {
+      async function importFilterSettingsYaml() {
         const text = (filterSettingsYaml.value || "").trim();
         if (!text) {
           setError("No YAML content to import.");
@@ -533,13 +815,40 @@
         const nextFilters = {};
         let inFiltersSection = false;
         let inMatchingExperimentsSection = false;
-        let currentListFilterColumn = null;
         const importedMatchingPaths = [];
 
+        const parseFilterEntry = (entryText) => {
+          const filterMatch = entryText.match(/^([A-Za-z0-9_.\[\]-]+):\s*(.*)$/);
+          if (!filterMatch) {
+            return;
+          }
+
+          const column = filterMatch[1];
+          const rawValue = filterMatch[2];
+          if (!currentColumns.includes(column)) {
+            return;
+          }
+
+          const parsedMapping = parseInlineYamlMapping(rawValue);
+          if (parsedMapping) {
+            const operator = parsedMapping.op || parsedMapping.operator || "contains";
+            const value = Object.prototype.hasOwnProperty.call(parsedMapping, "value") ? parsedMapping.value : "";
+            const normalized = normalizeFilterDefinition(operator, value);
+            if (normalized && !normalized.invalid) {
+              nextFilters[column] = normalized;
+            }
+            return;
+          }
+
+          const parsedList = parseInlineYamlList(rawValue);
+          const normalized = normalizeFilterDefinition("contains", parsedList !== null ? parsedList : unquoteYamlScalar(rawValue));
+          if (normalized && !normalized.invalid) {
+            nextFilters[column] = normalized;
+          }
+        };
+
         text.split(/\r?\n/).forEach((rawLine) => {
-          const trimmedLine = rawLine.trim();
-          const indent = rawLine.match(/^\s*/)?.[0].length || 0;
-          const line = trimmedLine;
+          const line = rawLine.trim();
           if (!line || line.startsWith("#")) {
             return;
           }
@@ -547,58 +856,20 @@
           if (line === "filters:") {
             inFiltersSection = true;
             inMatchingExperimentsSection = false;
-            currentListFilterColumn = null;
             return;
           }
 
-          if (line === "experiments:") {
+          if (line === "matching_experiments:" || line === "experiments:") {
             inMatchingExperimentsSection = true;
             inFiltersSection = false;
-            currentListFilterColumn = null;
             return;
           }
 
           if (inFiltersSection) {
-            if (indent <= 1 && /^[a-zA-Z_][a-zA-Z0-9_]*:\s*/.test(line) && line !== "experiments:" && line !== "bucket:" && line !== "prefix:") {
-              inFiltersSection = false;
-              currentListFilterColumn = null;
-            }
-          }
-
-          if (inFiltersSection) {
-            const listItemMatch = line.match(/^-\s*(.+)$/);
-            if (currentListFilterColumn && listItemMatch) {
-              const nextValue = normalizeFilterValue(unquoteYamlScalar(listItemMatch[1]));
-              if (nextValue) {
-                if (!Array.isArray(nextFilters[currentListFilterColumn])) {
-                  nextFilters[currentListFilterColumn] = [];
-                }
-                nextFilters[currentListFilterColumn].push(nextValue);
-              }
+            if (line === "[]") {
               return;
             }
-
-            const filterMatch = line.match(/^([A-Za-z0-9_.\[\]-]+):\s*(.*)$/);
-            if (!filterMatch) {
-              return;
-            }
-
-            const column = filterMatch[1];
-            const rawValue = filterMatch[2];
-            if (!currentColumns.includes(column)) {
-              currentListFilterColumn = null;
-              return;
-            }
-
-            if (rawValue === "") {
-              nextFilters[column] = [];
-              currentListFilterColumn = column;
-              return;
-            }
-
-            currentListFilterColumn = null;
-            const parsedList = parseInlineYamlList(rawValue);
-            nextFilters[column] = normalizeFilterValue(parsedList ?? unquoteYamlScalar(rawValue));
+            parseFilterEntry(line.startsWith("-") ? line.replace(/^-\s*/, "") : line);
             return;
           }
 
@@ -611,19 +882,11 @@
           }
         });
 
-        Object.keys(nextFilters).forEach((column) => {
-          const normalized = normalizeFilterValue(nextFilters[column]);
-          if (!normalized) {
-            delete nextFilters[column];
-          } else {
-            nextFilters[column] = normalized;
-          }
-        });
-
         columnFiltersState = nextFilters;
         sortRows();
         buildActiveFiltersPanel();
         renderTable();
+        await applyFilters();
 
         const currentMatchingPaths = getCurrentMatchingExperimentPaths();
         if (importedMatchingPaths.length > 0) {
@@ -637,19 +900,56 @@
         }
       }
 
-      function populateFilterColumnSelect() {
+      function populateFilterColumnSelect(preferredColumn = "") {
+        const selectedColumn = preferredColumn || filterColumnSelect.value;
+        const visibleSet = new Set(visibleColumns);
+
+        // For visible columns, deduplicate using merge groups so only the representative key appears.
+        const visibleKeys = visibleColumns.length
+          ? computeColumnMergeGroups(baseRows, visibleColumns).map((g) => g.key)
+          : [];
+
+        // Hidden columns: everything in currentColumns not currently visible.
+        const hiddenCols = currentColumns.filter((c) => !visibleSet.has(c));
+
         filterColumnSelect.innerHTML = "";
-        currentColumns.forEach((column) => {
-          const option = document.createElement("option");
-          option.value = column;
-          option.textContent = column;
-          filterColumnSelect.appendChild(option);
-        });
+
+        const addGroup = (cols, label) => {
+          if (!cols.length) return;
+          const optgroup = document.createElement("optgroup");
+          optgroup.label = label;
+          cols.forEach((column) => {
+            const option = document.createElement("option");
+            option.value = column;
+            option.textContent = column;
+            optgroup.appendChild(option);
+          });
+          filterColumnSelect.appendChild(optgroup);
+        };
+
+        addGroup(visibleKeys, "Visible");
+        addGroup(hiddenCols, "Hidden");
+
+        const allCols = [...visibleKeys, ...hiddenCols];
+        if (!allCols.length) {
+          return;
+        }
+
+        if (selectedColumn && allCols.includes(selectedColumn)) {
+          filterColumnSelect.value = selectedColumn;
+        } else {
+          filterColumnSelect.value = allCols[0];
+        }
       }
 
       function updateFilterValueOptions() {
         const selectedColumn = filterColumnSelect.value;
         if (!selectedColumn) return;
+
+        const existingFilter = columnFiltersState[selectedColumn];
+        const selectedOperator = populateOperatorSelect(filterOperatorSelect, selectedColumn, existingFilter?.operator || filterOperatorSelect.value || "contains");
+        updateFilterValueInputState(filterValueInput, selectedOperator, true);
+        filterValueInput.value = existingFilter && existingFilter.operator === selectedOperator ? formatFilterValueForInput(existingFilter) : "";
 
         const values = new Set();
         currentRows.forEach((row) => {
@@ -683,14 +983,13 @@
           chip.className = "filter-chip";
 
           const text = document.createElement("span");
-          const label = Array.isArray(value) ? value.join(" | ") : value;
-          text.textContent = `${column}: ${label}`;
+          text.textContent = `${column}: ${formatFilterLabel(value)}`;
 
           const remove = document.createElement("button");
           remove.type = "button";
           remove.className = "secondary";
           remove.textContent = "Remove";
-          remove.addEventListener("click", () => setColumnFilter(column, ""));
+          remove.addEventListener("click", () => setColumnFilter(column, "contains", ""));
 
           chip.appendChild(text);
           chip.appendChild(remove);
@@ -699,21 +998,22 @@
       }
 
       function openFilterComposer(prefillColumn) {
-        populateFilterColumnSelect();
+        populateFilterColumnSelect(prefillColumn);
         if (prefillColumn) {
           filterColumnSelect.value = prefillColumn;
-          filterValueInput.value = formatFilterValueForInput(columnFiltersState[prefillColumn]);
-        } else {
-          filterValueInput.value = "";
         }
         updateFilterValueOptions();
         filterComposer.classList.remove("hidden");
-        filterValueInput.focus();
+        if (!filterValueInput.disabled) {
+          filterValueInput.focus();
+        }
       }
 
       function closeFilterComposer() {
         filterComposer.classList.add("hidden");
+        populateOperatorSelect(filterOperatorSelect, filterColumnSelect.value || currentColumns[0] || "experiment_id", "contains");
         filterValueInput.value = "";
+        updateFilterValueInputState(filterValueInput, filterOperatorSelect.value, true);
       }
 
       // group = { key: string, columns: string[] }  (key is the representative column)
@@ -760,14 +1060,35 @@
         menu.className = "header-menu hidden";
 
         const filterLabel = document.createElement("label");
-        filterLabel.textContent = "Filter value";
+        filterLabel.textContent = "Filter";
+
+        const filterState = columnFiltersState[column];
+
+        const filterOperator = document.createElement("select");
+        filterOperator.dataset.filterOperatorColumn = column;
+        const selectedOperator = populateOperatorSelect(filterOperator, column, filterState?.operator || "contains");
 
         const filterInput = document.createElement("input");
-        filterInput.placeholder = "contains...";
-        filterInput.value = formatFilterValueForInput(columnFiltersState[column]);
+        filterInput.value = formatFilterValueForInput(filterState);
         filterInput.dataset.filterColumn = column;
-        filterInput.addEventListener("input", () => setColumnFilter(column, filterInput.value));
+        updateFilterValueInputState(filterInput, selectedOperator, false);
+        filterOperator.addEventListener("change", () => updateFilterValueInputState(filterInput, filterOperator.value, false));
         filterLabel.appendChild(filterInput);
+
+        const operatorLabel = document.createElement("label");
+        operatorLabel.textContent = "Operator";
+        operatorLabel.appendChild(filterOperator);
+
+        const applyHeaderFilterButton = document.createElement("button");
+        applyHeaderFilterButton.type = "button";
+        applyHeaderFilterButton.className = "secondary";
+        applyHeaderFilterButton.textContent = "Apply Filter";
+        applyHeaderFilterButton.addEventListener("click", () => {
+          const applied = setColumnFilter(column, filterOperator.value, filterInput.value);
+          if (applied) {
+            menuButton.textContent = "Filtered";
+          }
+        });
 
         const visibilityButton = document.createElement("button");
         visibilityButton.type = "button";
@@ -808,9 +1129,11 @@
         clearButton.type = "button";
         clearButton.className = "secondary";
         clearButton.textContent = "Clear Filter";
-        clearButton.addEventListener("click", () => setColumnFilter(column, ""));
+        clearButton.addEventListener("click", () => setColumnFilter(column, "contains", ""));
 
+        menu.appendChild(operatorLabel);
         menu.appendChild(filterLabel);
+        menu.appendChild(applyHeaderFilterButton);
         menu.appendChild(visibilityButton);
         menu.appendChild(addFilterButton);
         menu.appendChild(clearButton);
@@ -924,6 +1247,9 @@
         tableHead.innerHTML = "";
         tableBody.innerHTML = "";
 
+        // Keep filter column ordering in sync with current visibility state.
+        populateFilterColumnSelect();
+
         const activeColumns = visibleColumns.length ? visibleColumns : ["experiment_id"];
         // Merge columns that are identical across all experiments.
         const groups = computeColumnMergeGroups(baseRows, activeColumns);
@@ -968,30 +1294,69 @@
         applyFilters();
       }
 
-      function applyFilters() {
+      async function applyFilters() {
         if (!currentRows.length) {
+          currentMatchingIndexes = [];
           visibleCount.textContent = "0";
-          return;
+          return [];
         }
 
+        const token = ++filterRequestToken;
+        const filterSpecs = serializeFiltersForApi();
+        let matchingIndexes = currentRows.map((_, index) => index);
+
+        if (activeDatasetJobId && filterSpecs.length) {
+          try {
+            const response = await fetch("/api/filter", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                job_id: activeDatasetJobId,
+                filters: filterSpecs,
+                ordered_paths: currentRows.map((row) => String(row.__s3_path || "")).filter(Boolean),
+              }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+              throw new Error(data.error || "Could not filter rows");
+            }
+            matchingIndexes = Array.isArray(data.matching_indexes) ? data.matching_indexes : [];
+          } catch (err) {
+            if (token !== filterRequestToken) {
+              return currentMatchingIndexes;
+            }
+            setError(String(err));
+            matchingIndexes = [];
+          }
+        }
+
+        if (token !== filterRequestToken) {
+          return currentMatchingIndexes;
+        }
+
+        currentMatchingIndexes = matchingIndexes;
+
         const rows = Array.from(tableBody.querySelectorAll("tr"));
-        const matchingIndexes = new Set(getMatchingRowIndexes());
+        const matchingIndexSet = new Set(matchingIndexes);
         let shown = 0;
 
         rows.forEach((row) => {
           const rowIndex = Number(row.dataset.rowIndex || "0");
-          const matches = matchingIndexes.has(rowIndex);
+          const matches = matchingIndexSet.has(rowIndex);
           row.style.display = matches ? "" : "none";
           if (matches) shown += 1;
         });
 
         visibleCount.textContent = String(shown);
+        return matchingIndexes;
       }
 
-      function initializeData(columns, rows) {
+      function initializeData(columns, rows, datasetJobId) {
+        activeDatasetJobId = datasetJobId;
         currentColumns = columns;
         baseRows = [...rows];
         currentRows = [...rows];
+        currentMatchingIndexes = rows.map((_, index) => index);
         visibleColumns = [...columns];
         columnFiltersState = {};
         sortState = { column: null, direction: null };
@@ -1036,7 +1401,7 @@
           if (status.status === "done") {
             setLoading(false);
             currentJobId = null;
-            initializeData(status.columns || [], status.rows || []);
+            initializeData(status.columns || [], status.rows || [], jobId);
             setError("");
             return;
           }
@@ -1104,8 +1469,13 @@
       });
 
       openColumnManagerButton.addEventListener("click", () => {
+        const shouldOpen = columnManager.classList.contains("hidden");
+        if (shouldOpen) {
+          filtersPanel.classList.add("hidden");
+          closeFilterComposer();
+        }
         buildColumnManager();
-        columnManager.classList.toggle("hidden");
+        columnManager.classList.toggle("hidden", !shouldOpen);
       });
 
       closeColumnManagerButton.addEventListener("click", () => {
@@ -1113,7 +1483,15 @@
       });
 
       openFilterManagerButton.addEventListener("click", () => {
-        filtersPanel.classList.toggle("hidden");
+        const shouldOpen = filtersPanel.classList.contains("hidden");
+        if (shouldOpen) {
+          columnManager.classList.add("hidden");
+          populateFilterColumnSelect();
+        }
+        filtersPanel.classList.toggle("hidden", !shouldOpen);
+        if (!shouldOpen) {
+          closeFilterComposer();
+        }
       });
 
       closeFilterManagerButton.addEventListener("click", () => {
@@ -1154,13 +1532,16 @@
       });
 
       columnSearchInput.addEventListener("input", buildColumnManager);
+      filterOperatorSelect.addEventListener("change", () => updateFilterValueInputState(filterValueInput, filterOperatorSelect.value, true));
 
       openAddFilterButton.addEventListener("click", () => openFilterComposer());
       cancelAddFilterButton.addEventListener("click", closeFilterComposer);
 
       applyFilterButton.addEventListener("click", () => {
-        setColumnFilter(filterColumnSelect.value, filterValueInput.value);
-        closeFilterComposer();
+        const applied = setColumnFilter(filterColumnSelect.value, filterOperatorSelect.value, filterValueInput.value);
+        if (applied) {
+          closeFilterComposer();
+        }
       });
 
       exportFilterSettingsButton.addEventListener("click", exportFilterSettingsYaml);

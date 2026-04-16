@@ -9,6 +9,7 @@ from uuid import uuid4
 import boto3
 import botocore
 from botocore.config import Config
+from experiment_filters import filter_row_indexes
 from flask import Flask, jsonify, render_template, request
 from omegaconf import OmegaConf
 import yaml
@@ -398,6 +399,40 @@ def api_status(job_id: str) -> Any:
     if state is None:
         return jsonify({"error": "Job not found"}), 404
     return jsonify(state)
+
+
+@app.route("/api/filter", methods=["POST"])
+def api_filter() -> Any:
+    payload = request.get_json(silent=True) or {}
+    job_id = str(payload.get("job_id", "")).strip()
+    filter_specs = payload.get("filters") or []
+    ordered_paths = payload.get("ordered_paths") or []
+
+    if not job_id:
+        return jsonify({"error": "job_id is required"}), 400
+    if not isinstance(filter_specs, list):
+        return jsonify({"error": "filters must be a list"}), 400
+    if not isinstance(ordered_paths, list):
+        return jsonify({"error": "ordered_paths must be a list"}), 400
+
+    state = get_job_state(job_id)
+    if state is None:
+        return jsonify({"error": "Job not found"}), 404
+    if state.get("status") != "done":
+        return jsonify({"error": "Job is not ready for filtering"}), 409
+
+    rows = state.get("rows") or []
+    ordered_rows = rows
+    if ordered_paths:
+        rows_by_path = {str(row.get("__s3_path", "")): row for row in rows if row.get("__s3_path")}
+        ordered_rows = [rows_by_path[path] for path in map(str, ordered_paths) if path in rows_by_path]
+
+    try:
+        matching_indexes = filter_row_indexes(ordered_rows, filter_specs)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    return jsonify({"matching_indexes": matching_indexes})
 
 
 @app.route("/api/abort/<job_id>", methods=["POST"])

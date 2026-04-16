@@ -278,6 +278,24 @@ progress {
   gap: 8px;
 }
 
+.column-list-item[draggable="true"] {
+  cursor: grab;
+}
+
+.column-list-item.drag-over {
+  border-color: var(--accent, #4a90d9);
+  background: #f0f6ff;
+}
+
+.drag-handle {
+  color: #aaa;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: grab;
+  user-select: none;
+  flex-shrink: 0;
+}
+
 .column-list-item span {
   font-size: 0.88rem;
   word-break: break-word;
