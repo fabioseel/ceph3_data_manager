@@ -21,13 +21,6 @@ JOBS_LOCK = Lock()
 
 
 @dataclass
-class FlatRecord:
-    file_key: str
-    flat_key: str
-    value: str
-
-
-@dataclass
 class ExperimentConfigFiles:
     experiment_id: str
     config_key: str | None = None

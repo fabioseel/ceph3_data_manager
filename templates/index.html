@@ -531,6 +531,43 @@
         return currentColumns.filter((column) => column.toLowerCase().includes(searchNeedle));
       }
 
+      function setupDragHandlers(item, groupKey, visibleGroups) {
+        item.addEventListener("dragstart", (e) => {
+          dragSrcColumn = groupKey;
+          e.dataTransfer.effectAllowed = "move";
+        });
+        item.addEventListener("dragover", (e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          item.classList.add("drag-over");
+        });
+        item.addEventListener("dragleave", () => {
+          item.classList.remove("drag-over");
+        });
+        item.addEventListener("drop", (e) => {
+          e.preventDefault();
+          item.classList.remove("drag-over");
+          if (!dragSrcColumn || dragSrcColumn === groupKey) return;
+          const srcGroup = visibleGroups.find((g) => g.key === dragSrcColumn);
+          if (!srcGroup) return;
+          const srcIdx = visibleColumns.indexOf(srcGroup.columns[0]);
+          const dstIdx = visibleColumns.indexOf(item.dataset.groupColumns.split(",")[0]);
+          if (srcIdx === -1 || dstIdx === -1) return;
+          srcGroup.columns.forEach((col) => {
+            const idx = visibleColumns.indexOf(col);
+            if (idx !== -1) visibleColumns.splice(idx, 1);
+          });
+          visibleColumns.splice(dstIdx, 0, ...srcGroup.columns);
+          dragSrcColumn = null;
+          buildColumnManager();
+          renderTable();
+        });
+        item.addEventListener("dragend", () => {
+          dragSrcColumn = null;
+          document.querySelectorAll(".column-list-item.drag-over").forEach((el) => el.classList.remove("drag-over"));
+        });
+      }
+
       function buildColumnManager() {
         const searchNeedle = (columnSearchInput.value || "").trim().toLowerCase();
         visibleColumnsList.innerHTML = "";
@@ -579,40 +616,8 @@
             renderTable();
           });
 
-          item.addEventListener("dragstart", (e) => {
-            dragSrcColumn = group.key;
-            e.dataTransfer.effectAllowed = "move";
-          });
-          item.addEventListener("dragover", (e) => {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = "move";
-            item.classList.add("drag-over");
-          });
-          item.addEventListener("dragleave", () => {
-            item.classList.remove("drag-over");
-          });
-          item.addEventListener("drop", (e) => {
-            e.preventDefault();
-            item.classList.remove("drag-over");
-            if (!dragSrcColumn || dragSrcColumn === group.key) return;
-            const srcGroup = visibleGroups.find((g) => g.key === dragSrcColumn);
-            if (!srcGroup) return;
-            const srcIdx = visibleColumns.indexOf(srcGroup.columns[0]);
-            const dstIdx = visibleColumns.indexOf(group.columns[0]);
-            if (srcIdx === -1 || dstIdx === -1) return;
-            srcGroup.columns.forEach((col) => {
-              const idx = visibleColumns.indexOf(col);
-              if (idx !== -1) visibleColumns.splice(idx, 1);
-            });
-            visibleColumns.splice(dstIdx, 0, ...srcGroup.columns);
-            dragSrcColumn = null;
-            buildColumnManager();
-            renderTable();
-          });
-          item.addEventListener("dragend", () => {
-            dragSrcColumn = null;
-            document.querySelectorAll(".column-list-item.drag-over").forEach((el) => el.classList.remove("drag-over"));
-          });
+          item.dataset.groupColumns = group.columns.join(",");
+          setupDragHandlers(item, group.key, visibleGroups);
 
           item.appendChild(handle);
           item.appendChild(label);

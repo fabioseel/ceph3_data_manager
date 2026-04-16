@@ -20,7 +20,7 @@ with ``op`` (required) and ``value`` (required for all operators except
 """
 from __future__ import annotations
 
-import io
+import re
 from pathlib import Path
 from typing import Any, Iterator, Sequence, TypedDict
 
@@ -140,7 +140,7 @@ def _parse_inline_mapping(raw: str) -> dict[str, Any] | None:
 
 def _parse_filter_entry(entry_text: str, known_columns: set[str] | None = None) -> FilterSpec | None:
     """Parse one ``column: value`` entry from the filters list."""
-    m = __import__("re").match(r"^([A-Za-z0-9_.\[\]-]+):\s*(.*)$", entry_text)
+    m = re.match(r"^([A-Za-z0-9_.\[\]-]+):\s*(.*)$", entry_text)
     if not m:
         return None
     column, raw_value = m.group(1), m.group(2)
@@ -204,7 +204,6 @@ def _iter_matching_experiments(text: str) -> Iterator[str]:
 
 def _scalar(text: str, key: str) -> str:
     """Extract a top-level scalar value from a minimal YAML text."""
-    import re
     m = re.search(rf'^{re.escape(key)}:\s*(.+)$', text, re.MULTILINE)
     if not m:
         return ""
