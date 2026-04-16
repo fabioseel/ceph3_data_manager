@@ -536,19 +536,25 @@
         visibleColumnsList.innerHTML = "";
         hiddenColumnsList.innerHTML = "";
 
-        // Render visible columns in visibleColumns order (not currentColumns order)
-        const orderedVisible = visibleColumns.filter(
-          (column) => !searchNeedle || column.toLowerCase().includes(searchNeedle)
-        );
-        const hiddenCols = currentColumns.filter(
-          (column) => !visibleColumns.includes(column) && (!searchNeedle || column.toLowerCase().includes(searchNeedle))
-        );
+        // For visible columns, compute merge groups so merged columns appear as one item
+        const visibleGroups = visibleColumns.length
+          ? computeColumnMergeGroups(baseRows, visibleColumns)
+          : [];
 
-        orderedVisible.forEach((column) => {
+        // Hidden columns: everything in currentColumns not currently visible.
+        const hiddenCols = currentColumns.filter((c) => !visibleColumns.includes(c));
+
+        // Render visible merge groups
+        visibleGroups.forEach((group) => {
+          const matchesSearch =
+            !searchNeedle ||
+            group.columns.some((col) => col.toLowerCase().includes(searchNeedle));
+          if (!matchesSearch) return;
+
           const item = document.createElement("div");
           item.className = "column-list-item";
           item.draggable = true;
-          item.dataset.column = column;
+          item.dataset.column = group.key;
 
           const handle = document.createElement("span");
           handle.className = "drag-handle";
@@ -556,21 +562,25 @@
           handle.title = "Drag to reorder";
 
           const label = document.createElement("span");
-          label.textContent = column;
+          const isMerged = group.columns.length > 1;
+          label.textContent = isMerged ? `${group.key} (${group.columns.length})` : group.key;
+          if (isMerged) {
+            label.title = `Merged columns: ${group.columns.join(", ")}`;
+          }
 
           const button = document.createElement("button");
           button.type = "button";
           button.className = "secondary";
           button.textContent = "Hide";
-          button.disabled = column === "experiment_id";
+          button.disabled = group.columns.includes("experiment_id");
           button.addEventListener("click", () => {
-            setColumnVisible(column, false);
+            group.columns.forEach((col) => setColumnVisible(col, false));
             buildColumnManager();
             renderTable();
           });
 
           item.addEventListener("dragstart", (e) => {
-            dragSrcColumn = column;
+            dragSrcColumn = group.key;
             e.dataTransfer.effectAllowed = "move";
           });
           item.addEventListener("dragover", (e) => {
@@ -584,12 +594,17 @@
           item.addEventListener("drop", (e) => {
             e.preventDefault();
             item.classList.remove("drag-over");
-            if (!dragSrcColumn || dragSrcColumn === column) return;
-            const srcIdx = visibleColumns.indexOf(dragSrcColumn);
-            const dstIdx = visibleColumns.indexOf(column);
+            if (!dragSrcColumn || dragSrcColumn === group.key) return;
+            const srcGroup = visibleGroups.find((g) => g.key === dragSrcColumn);
+            if (!srcGroup) return;
+            const srcIdx = visibleColumns.indexOf(srcGroup.columns[0]);
+            const dstIdx = visibleColumns.indexOf(group.columns[0]);
             if (srcIdx === -1 || dstIdx === -1) return;
-            visibleColumns.splice(srcIdx, 1);
-            visibleColumns.splice(dstIdx, 0, dragSrcColumn);
+            srcGroup.columns.forEach((col) => {
+              const idx = visibleColumns.indexOf(col);
+              if (idx !== -1) visibleColumns.splice(idx, 1);
+            });
+            visibleColumns.splice(dstIdx, 0, ...srcGroup.columns);
             dragSrcColumn = null;
             buildColumnManager();
             renderTable();
@@ -605,7 +620,11 @@
           visibleColumnsList.appendChild(item);
         });
 
+        // Render hidden columns
         hiddenCols.forEach((column) => {
+          const matchesSearch = !searchNeedle || column.toLowerCase().includes(searchNeedle);
+          if (!matchesSearch) return;
+
           const item = document.createElement("div");
           item.className = "column-list-item";
 
