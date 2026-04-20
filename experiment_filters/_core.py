@@ -13,6 +13,12 @@ _OPERATOR_ALIASES: dict[str, str] = {
     "not_match": "not_contains",
     "not_matches": "not_contains",
     "!contains": "not_contains",
+    "is_one_of": "is_one_of",
+    "is one of": "is_one_of",
+    "in": "is_one_of",
+    "is_not_one_of": "is_not_one_of",
+    "is not one of": "is_not_one_of",
+    "not_in": "is_not_one_of",
     "missing": "missing",
     "absent": "missing",
     "is_missing": "missing",
@@ -78,7 +84,7 @@ def compile_filter_spec(spec: dict[str, Any]) -> CompiledFilter:
     if operator == "missing":
         return CompiledFilter(column=column, operator=operator)
 
-    if operator in ("contains", "not_contains"):
+    if operator in ("contains", "not_contains", "is_one_of", "is_not_one_of"):
         text_values = _normalize_text_values(spec.get("value"))
         if not text_values:
             raise ValueError(f"Filter value is required for column: {column}")
@@ -116,6 +122,18 @@ def row_matches_filters(row: dict[str, Any], filters: Sequence[CompiledFilter]) 
         if f.operator == "not_contains":
             normalized_cell = str(cell_value or "").lower()
             if any(tv in normalized_cell for tv in f.text_values):
+                return False
+            continue
+
+        if f.operator == "is_one_of":
+            normalized_cell = str(cell_value or "").strip().lower()
+            if normalized_cell not in f.text_values:
+                return False
+            continue
+
+        if f.operator == "is_not_one_of":
+            normalized_cell = str(cell_value or "").strip().lower()
+            if normalized_cell in f.text_values:
                 return False
             continue
 

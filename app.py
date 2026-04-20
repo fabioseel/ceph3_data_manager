@@ -310,7 +310,7 @@ def extract_last_analysis_step(s3_client: Any, bucket: str, experiment_id: str) 
 
 def load_experiment_rows(
     bucket: str,
-    prefix: str = "",
+    prefixes: list[str] | None = None,
     region: str | None = None,
     endpoint_url: str | None = None,
     progress_callback: Any | None = None,
@@ -318,8 +318,15 @@ def load_experiment_rows(
 ) -> tuple[list[dict[str, str]], list[str], str | None]:
     try:
         s3_client = create_s3_client(region=region, endpoint_url=endpoint_url)
-        keys = iter_yaml_keys(s3_client, bucket=bucket, prefix=prefix)
-        experiments = collect_experiment_files(keys)
+        effective_prefixes = prefixes if prefixes else [""]
+        all_keys: list[str] = []
+        seen_keys: set[str] = set()
+        for prefix in effective_prefixes:
+            for key in iter_yaml_keys(s3_client, bucket=bucket, prefix=prefix):
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    all_keys.append(key)
+        experiments = collect_experiment_files(all_keys)
 
         total = len(experiments)
         processed = 0
@@ -390,7 +397,7 @@ def get_job_state(job_id: str) -> dict[str, Any] | None:
         return dict(job)
 
 
-def run_load_job(job_id: str, bucket: str, prefix: str, region: str | None, endpoint_url: str | None) -> None:
+def run_load_job(job_id: str, bucket: str, prefixes: list[str], region: str | None, endpoint_url: str | None) -> None:
     def progress_callback(phase: str, processed: int, total: int) -> None:
         set_job_state(job_id, phase=phase, processed=processed, total=total)
 
@@ -400,7 +407,7 @@ def run_load_job(job_id: str, bucket: str, prefix: str, region: str | None, endp
 
     rows, columns, error = load_experiment_rows(
         bucket=bucket,
-        prefix=prefix,
+        prefixes=prefixes,
         region=region,
         endpoint_url=endpoint_url,
         progress_callback=progress_callback,
@@ -421,14 +428,14 @@ def run_load_job(job_id: str, bucket: str, prefix: str, region: str | None, endp
 @app.route("/", methods=["GET"])
 def index() -> str:
     bucket = request.args.get("bucket", os.getenv("S3_BUCKET", "")).strip()
-    prefix = request.args.get("prefix", os.getenv("S3_PREFIX", "")).strip()
+    prefix_raw = request.args.get("prefix", os.getenv("S3_PREFIX", ""))
     region = request.args.get("region", os.getenv("AWS_REGION", "")).strip() or None
     endpoint_url = request.args.get("endpoint_url", os.getenv("S3_ENDPOINT_URL", "")).strip() or None
 
     return render_template(
         "index.html",
         bucket=bucket,
-        prefix=prefix,
+        prefix=prefix_raw,
         region=region or "",
         endpoint_url=endpoint_url or "",
     )
@@ -438,9 +445,16 @@ def index() -> str:
 def api_load() -> Any:
     payload = request.get_json(silent=True) or {}
     bucket = str(payload.get("bucket", "")).strip()
-    prefix = str(payload.get("prefix", "")).strip()
     region = str(payload.get("region", "")).strip() or None
     endpoint_url = str(payload.get("endpoint_url", "")).strip() or None
+
+    # Accept either a list of prefixes or a single prefix string.
+    raw_prefixes = payload.get("prefixes")
+    if isinstance(raw_prefixes, list):
+        prefixes = [str(p).strip() for p in raw_prefixes if str(p).strip()]
+    else:
+        single = str(payload.get("prefix", "")).strip()
+        prefixes = [single] if single else []
 
     if not bucket:
         return jsonify({"error": "Bucket is required"}), 400
@@ -458,7 +472,7 @@ def api_load() -> Any:
             "cancel_requested": False,
         }
 
-    worker = Thread(target=run_load_job, args=(job_id, bucket, prefix, region, endpoint_url), daemon=True)
+    worker = Thread(target=run_load_job, args=(job_id, bucket, prefixes, region, endpoint_url), daemon=True)
     worker.start()
 
     return jsonify({"job_id": job_id})

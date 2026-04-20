@@ -17,8 +17,8 @@
             <input name="bucket" value="{{ bucket }}" placeholder="my-config-bucket" required />
           </label>
           <label>
-            Prefix (optional)
-            <input name="prefix" value="{{ prefix }}" placeholder="team-a/" />
+            Prefixes (optional, one per line)
+            <textarea name="prefix" rows="3" placeholder="team-a/&#10;team-b/">{{ prefix }}</textarea>
           </label>
           <label>
             AWS Region (optional)
@@ -384,6 +384,8 @@
         const options = [
           { value: "contains", label: "Contains" },
           { value: "not_contains", label: "Does Not Contain" },
+          { value: "is_one_of", label: "Is (in)" },
+          { value: "is_not_one_of", label: "Is not (in)" },
           { value: "missing", label: "Is Missing" },
         ];
 
@@ -423,9 +425,15 @@
           return;
         }
 
-        if (operator === "contains" || operator === "not_contains") {
-          inputElement.placeholder = operator === "contains" ? "or select from dropdown..." : "must not contain...";
-          if (useSuggestions && operator === "contains") {
+        if (operator === "contains" || operator === "not_contains" || operator === "is_one_of" || operator === "is_not_one_of") {
+          if (operator === "contains") {
+            inputElement.placeholder = "or select from dropdown...";
+          } else if (operator === "is_one_of") {
+            inputElement.placeholder = "value1, value2, ... (exact match)";
+          } else {
+            inputElement.placeholder = "value1, value2, ...";
+          }
+          if (useSuggestions && (operator === "contains" || operator === "is_one_of")) {
             inputElement.setAttribute("list", "filterValueList");
           } else {
             inputElement.removeAttribute("list");
@@ -455,7 +463,7 @@
           return { operator: "missing" };
         }
 
-        if (normalizedOperator === "contains" || normalizedOperator === "not_contains") {
+        if (normalizedOperator === "contains" || normalizedOperator === "not_contains" || normalizedOperator === "is_one_of" || normalizedOperator === "is_not_one_of") {
           const normalizedValue = normalizeContainsFilterValue(value);
           return normalizedValue ? { operator: normalizedOperator, value: normalizedValue } : null;
         }
@@ -511,8 +519,16 @@
           return "is missing";
         }
         if (filterState.operator === "not_contains") {
-          if (Array.isArray(filterState.value)) return `not: ${filterState.value.join(" | ")}`;
-          return `not: ${filterState.value}`;
+          if (Array.isArray(filterState.value)) return `not~: ${filterState.value.join(" | ")}`;
+          return `not~: ${filterState.value}`;
+        }
+        if (filterState.operator === "is_not_one_of") {
+          if (Array.isArray(filterState.value)) return `not=: ${filterState.value.join(" | ")}`;
+          return `not=: ${filterState.value}`;
+        }
+        if (filterState.operator === "is_one_of") {
+          if (Array.isArray(filterState.value)) return `= ${filterState.value.join(" | ")}`;
+          return `= ${filterState.value}`;
         }
         if (filterState.operator === "lt") {
           return `< ${filterState.value}`;
@@ -530,7 +546,7 @@
         if (filterState.operator === "missing") {
           return "{ op: missing }";
         }
-        if (filterState.operator === "not_contains" || filterState.operator === "lt" || filterState.operator === "gt") {
+        if (filterState.operator === "not_contains" || filterState.operator === "is_one_of" || filterState.operator === "is_not_one_of" || filterState.operator === "lt" || filterState.operator === "gt") {
           const v = Array.isArray(filterState.value)
             ? `[${filterState.value.map((item) => yamlQuote(item)).join(", ")}]`
             : yamlQuote(filterState.value);
@@ -844,12 +860,20 @@
       function exportFilterSettingsYaml() {
         const formData = new FormData(controlsForm);
         const bucket = String(formData.get("bucket") || "").trim();
-        const prefix = String(formData.get("prefix") || "").trim();
+        const rawPrefixes = String(formData.get("prefix") || "")
+          .split(/[\n,]+/)
+          .map((p) => p.trim())
+          .filter(Boolean);
         const activeFilters = Object.entries(columnFiltersState).filter(([, value]) => value);
 
         const lines = [];
         lines.push("bucket: " + yamlQuote(bucket));
-        lines.push("prefix: " + yamlQuote(prefix));
+        lines.push("prefixes:");
+        if (rawPrefixes.length > 0) {
+          rawPrefixes.forEach((p) => lines.push("  - " + yamlQuote(p)));
+        } else {
+          lines.push("  []");
+        }
         lines.push("filters:");
         if (activeFilters.length === 0) {
           lines.push("  []");
@@ -882,7 +906,10 @@
         const nextFilters = {};
         let inFiltersSection = false;
         let inMatchingExperimentsSection = false;
+        let inPrefixesSection = false;
         const importedMatchingPaths = [];
+        const importedPrefixes = [];
+        let importedBucket = null;
 
         const parseFilterEntry = (entryText) => {
           const filterMatch = entryText.match(/^([A-Za-z0-9_.\[\]-]+):\s*(.*)$/);
@@ -923,13 +950,41 @@
           if (line === "filters:") {
             inFiltersSection = true;
             inMatchingExperimentsSection = false;
+            inPrefixesSection = false;
             return;
           }
 
           if (line === "matching_experiments:" || line === "experiments:") {
             inMatchingExperimentsSection = true;
             inFiltersSection = false;
+            inPrefixesSection = false;
             return;
+          }
+
+          if (line === "prefixes:") {
+            inPrefixesSection = true;
+            inFiltersSection = false;
+            inMatchingExperimentsSection = false;
+            return;
+          }
+
+          if (inPrefixesSection) {
+            if (line.startsWith("-")) {
+              importedPrefixes.push(unquoteYamlScalar(line.replace(/^-\s*/, "")));
+              return;
+            }
+            inPrefixesSection = false;
+          }
+
+          // Parse top-level scalars (bucket, prefix) before section handlers.
+          if (!inFiltersSection && !inMatchingExperimentsSection) {
+            const scalarMatch = line.match(/^(bucket|prefix):\s*(.+)$/);
+            if (scalarMatch) {
+              const val = unquoteYamlScalar(scalarMatch[2]);
+              if (scalarMatch[1] === "bucket") importedBucket = val;
+              if (scalarMatch[1] === "prefix") importedPrefixes.push(val);
+              return;
+            }
           }
 
           if (inFiltersSection) {
@@ -950,6 +1005,17 @@
         });
 
         columnFiltersState = nextFilters;
+
+        // Restore bucket and prefixes into the settings form.
+        if (importedBucket !== null) {
+          const bucketInput = controlsForm.querySelector('input[name="bucket"]');
+          if (bucketInput) bucketInput.value = importedBucket;
+        }
+        if (importedPrefixes.length > 0) {
+          const prefixArea = controlsForm.querySelector('[name="prefix"]');
+          if (prefixArea) prefixArea.value = importedPrefixes.join("\n");
+        }
+
         sortRows();
         buildActiveFiltersPanel();
         renderTable();
@@ -1502,9 +1568,13 @@
         emptyState.textContent = "Loading...";
 
         const formData = new FormData(controlsForm);
+        const rawPrefixes = String(formData.get("prefix") || "")
+          .split(/[\n,]+/)
+          .map((p) => p.trim())
+          .filter(Boolean);
         const payload = {
           bucket: String(formData.get("bucket") || "").trim(),
-          prefix: String(formData.get("prefix") || "").trim(),
+          prefixes: rawPrefixes,
           region: String(formData.get("region") || "").trim(),
           endpoint_url: String(formData.get("endpoint_url") || "").trim(),
         };

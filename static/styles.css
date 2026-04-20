@@ -78,6 +78,13 @@ body {
   gap: 10px;
 }
 
+.settings-form textarea {
+  font-family: inherit;
+  font-size: inherit;
+  resize: vertical;
+  min-height: 3.6em;
+}
+
 .settings-form .inline-toggle {
   display: flex;
   flex-direction: row;

@@ -43,6 +43,7 @@ class FilterSpec(TypedDict, total=False):
 class FilterSettings(TypedDict, total=False):
     bucket: str
     prefix: str
+    prefixes: list[str]
     filters: list[FilterSpec]
     matching_experiments: list[str]
 
@@ -66,7 +67,10 @@ def _serialize_filter_value(spec: FilterSpec) -> str:
     if op == "missing":
         return "{ op: missing }"
 
-    if op in ("lt", "gt", "not_contains"):
+    if op in ("lt", "gt", "not_contains", "is_one_of", "is_not_one_of"):
+        if isinstance(value, list):
+            items = ", ".join(_yaml_quote(str(v)) for v in value)
+            return f"{{ op: {op}, value: [{items}] }}"
         return f"{{ op: {op}, value: {_yaml_quote(str(value))} }}"
 
     # contains — plain scalar or list
@@ -202,6 +206,28 @@ def _iter_matching_experiments(text: str) -> Iterator[str]:
             yield _unquote(line[1:].strip())
 
 
+def _iter_prefixes(text: str) -> list[str]:
+    """Extract prefixes from YAML text, supporting both ``prefix:`` and ``prefixes:`` keys."""
+    in_prefixes = False
+    items: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "prefixes:":
+            in_prefixes = True
+            continue
+        if in_prefixes:
+            if line.startswith("-"):
+                items.append(_unquote(line[1:].strip()))
+                continue
+            in_prefixes = False
+    if items:
+        return items
+    scalar = _scalar(text, "prefix")
+    return [scalar] if scalar else []
+
+
 def _scalar(text: str, key: str) -> str:
     """Extract a top-level scalar value from a minimal YAML text."""
     m = re.search(rf'^{re.escape(key)}:\s*(.+)$', text, re.MULTILINE)
@@ -241,7 +267,8 @@ def parse_filter_settings(
 
     return FilterSettings(
         bucket=_scalar(text, "bucket"),
-        prefix=_scalar(text, "prefix"),
+        prefixes=(ps := _iter_prefixes(text)),
+        prefix=ps[0] if ps else "",
         filters=filters,
         matching_experiments=list(_iter_matching_experiments(text)),
     )
@@ -272,9 +299,14 @@ def dump_filter_settings(
     """
     lines: list[str] = []
     bucket = settings.get("bucket", "")
-    prefix = settings.get("prefix", "")
+    prefixes = settings.get("prefixes") or ([settings.get("prefix")] if settings.get("prefix") else [])
     lines.append(f"bucket: {_yaml_quote(bucket)}")
-    lines.append(f"prefix: {_yaml_quote(prefix)}")
+    lines.append("prefixes:")
+    if prefixes:
+        for p in prefixes:
+            lines.append(f"  - {_yaml_quote(p)}")
+    else:
+        lines.append("  []")
 
     filters = settings.get("filters") or []
     lines.append("filters:")

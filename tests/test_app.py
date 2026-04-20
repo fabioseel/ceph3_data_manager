@@ -395,7 +395,7 @@ def test_load_experiment_rows_uses_short_path_as_run_name(monkeypatch: pytest.Mo
     monkeypatch.setattr(app_module, "extract_git_hash_value", lambda s3_client, bucket, experiment_id: "")
     monkeypatch.setattr(app_module, "extract_last_analysis_step", lambda s3_client, bucket, experiment_id: "")
 
-    rows, columns, error = app_module.load_experiment_rows(bucket="berens0", prefix="runs/")
+    rows, columns, error = app_module.load_experiment_rows(bucket="berens0", prefixes=["runs/"])
 
     assert error is None
     assert columns[0] == "run_name"
