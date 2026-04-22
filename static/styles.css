@@ -442,6 +442,12 @@ thead th {
   min-width: 200px;
 }
 
+.header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .th-label {
   font-size: 0.88rem;
   word-break: break-word;
@@ -498,6 +504,23 @@ th.th-merged .th-sort::after {
   padding: 4px 8px;
   border-radius: 8px;
   font-size: 0.75rem;
+}
+
+.header-icon-button {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.header-menu-button.has-filter {
+  border-color: #245f7a;
+  background: #e6f4fa;
+  color: #0f3950;
 }
 
 .header-menu {
