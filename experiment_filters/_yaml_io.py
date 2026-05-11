@@ -26,7 +26,7 @@ from typing import Any, Iterator, Sequence, TypedDict
 
 import yaml
 
-from experiment_filters._core import compile_filters
+from experiment_filters._core import compile_filters, normalize_filter_logic
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +44,7 @@ class FilterSettings(TypedDict, total=False):
     bucket: str
     prefix: str
     prefixes: list[str]
+    filter_logic: str
     filters: list[FilterSpec]
     matching_experiments: list[str]
 
@@ -67,7 +68,15 @@ def _serialize_filter_value(spec: FilterSpec) -> str:
     if op == "missing":
         return "{ op: missing }"
 
-    if op in ("lt", "gt", "not_contains", "is_one_of", "is_not_one_of"):
+    if op == "is_one_of":
+        if isinstance(value, list):
+            if len(value) == 1:
+                return _yaml_quote(str(value[0]))
+            items = ", ".join(_yaml_quote(str(v)) for v in value)
+            return f"{{ op: {op}, value: [{items}] }}"
+        return _yaml_quote(str(value))
+
+    if op in ("lt", "gt", "not_contains", "is_not_one_of"):
         if isinstance(value, list):
             items = ", ".join(_yaml_quote(str(v)) for v in value)
             return f"{{ op: {op}, value: [{items}] }}"
@@ -262,6 +271,7 @@ def parse_filter_settings(
     """
     col_set = set(known_columns) if known_columns is not None else None
     filters = list(_iter_filter_specs(text, col_set))
+    filter_logic = normalize_filter_logic(_scalar(text, "filter_logic") or "and")
     if validate and filters:
         compile_filters(filters)  # raises ValueError on bad specs
 
@@ -269,6 +279,7 @@ def parse_filter_settings(
         bucket=_scalar(text, "bucket"),
         prefixes=(ps := _iter_prefixes(text)),
         prefix=ps[0] if ps else "",
+        filter_logic=filter_logic,
         filters=filters,
         matching_experiments=list(_iter_matching_experiments(text)),
     )
@@ -307,6 +318,8 @@ def dump_filter_settings(
             lines.append(f"  - {_yaml_quote(p)}")
     else:
         lines.append("  []")
+
+    lines.append(f"filter_logic: {normalize_filter_logic(settings.get('filter_logic', 'and'))}")
 
     filters = settings.get("filters") or []
     lines.append("filters:")

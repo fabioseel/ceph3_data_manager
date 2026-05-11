@@ -233,6 +233,56 @@ def test_merge_experiment_config_handles_hydra_yaml_with_root_hydra(monkeypatch:
     assert flat["hydra.runtime.output_dir"] == "outputs/exp-1"
 
 
+def test_merge_experiment_config_ignores_hydra_choice_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    files = app_module.ExperimentConfigFiles(
+        experiment_id="runs/exp-1",
+        config_key="runs/exp-1/config/config.yaml",
+        hydra_key="runs/exp-1/config/hydra.yaml",
+        overrides_key="runs/exp-1/config/overrides.yaml",
+    )
+
+    yaml_by_key = {
+        files.config_key: {
+            "optimizer": {
+                "num_epochs": 200,
+                "optimizer": {"_target_": "torch.optim.Adam", "lr": 0.001},
+            },
+            "brain": {"circuits": {"retina": {"num_layers": 2}}},
+            "logging": {"wandb_project": "baseline"},
+        },
+        files.hydra_key: {
+            "hydra": {
+                "runtime": {
+                    "choices": {
+                        "optimizer": "eff-brain-rand-retina",
+                        "brain": "eff-brain-rl",
+                        "experiment": "eff-coding",
+                    }
+                }
+            }
+        },
+        files.overrides_key: [
+            "optimizer=eff-brain-rand-retina",
+            "brain=eff-brain-rl",
+            "+experiment=eff-coding",
+            "logging.wandb_project=override-project",
+        ],
+    }
+
+    def fake_read_yaml(_s3_client: Any, bucket: str, key: str) -> Any:
+        _ = bucket
+        return yaml_by_key[key]
+
+    monkeypatch.setattr(app_module, "read_yaml_from_s3", fake_read_yaml)
+
+    flat = app_module.merge_experiment_config(s3_client=object(), bucket="berens0", files=files)
+
+    assert flat["optimizer.num_epochs"] == 200
+    assert flat["optimizer.optimizer._target_"] == "torch.optim.Adam"
+    assert flat["brain.circuits.retina.num_layers"] == 2
+    assert flat["logging.wandb_project"] == "override-project"
+
+
 def test_api_filter_returns_matching_indexes_in_requested_order() -> None:
     job_id = "job-filter-ordered"
     with app_module.JOBS_LOCK:
@@ -286,6 +336,111 @@ def test_api_filter_rejects_invalid_filter_specs() -> None:
 
         assert response.status_code == 400
         assert response.get_json() == {"error": "Unsupported filter operator: sideways"}
+    finally:
+        with app_module.JOBS_LOCK:
+            app_module.JOBS.pop(job_id, None)
+
+
+def test_api_filter_supports_or_combination() -> None:
+    job_id = "job-filter-or"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "status": "done",
+            "rows": [
+                {"experiment_id": "run-1", "__s3_path": "runs/exp-1", "score": "0.81", "notes": ""},
+                {"experiment_id": "run-2", "__s3_path": "runs/exp-2", "score": "0.95", "notes": "kept"},
+                {"experiment_id": "run-3", "__s3_path": "runs/exp-3", "score": "0.40", "notes": ""},
+            ],
+        }
+
+    try:
+        client = app_module.app.test_client()
+        response = client.post(
+            "/api/filter",
+            json={
+                "job_id": job_id,
+                "filters": [
+                    {"column": "score", "operator": "gt", "value": "0.9"},
+                    {"column": "notes", "operator": "missing"},
+                ],
+                "combine_with": "or",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.get_json() == {"matching_indexes": [0, 1, 2]}
+    finally:
+        with app_module.JOBS_LOCK:
+            app_module.JOBS.pop(job_id, None)
+
+
+def test_api_filter_rejects_invalid_filter_logic() -> None:
+    job_id = "job-filter-invalid-logic"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "status": "done",
+            "rows": [{"experiment_id": "run-1", "__s3_path": "runs/exp-1", "score": "0.81"}],
+        }
+
+    try:
+        client = app_module.app.test_client()
+        response = client.post(
+            "/api/filter",
+            json={
+                "job_id": job_id,
+                "filters": [{"column": "score", "operator": "gt", "value": "0.9"}],
+                "combine_with": "xor",
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.get_json() == {"error": "Unsupported filter logic: xor"}
+    finally:
+        with app_module.JOBS_LOCK:
+            app_module.JOBS.pop(job_id, None)
+
+
+def test_api_filter_supports_nested_filter_groups() -> None:
+    """Test API with nested filter group structure."""
+    job_id = "job-filter-nested"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "status": "done",
+            "rows": [
+                {"experiment_id": "run-1", "__s3_path": "runs/exp-1", "score": "0.81", "tag": "baseline", "epoch": "10"},
+                {"experiment_id": "run-2", "__s3_path": "runs/exp-2", "score": "0.95", "tag": "aug", "epoch": "25"},
+                {"experiment_id": "run-3", "__s3_path": "runs/exp-3", "score": "1.20", "tag": "baseline", "epoch": "40"},
+            ],
+        }
+
+    try:
+        client = app_module.app.test_client()
+        # Create nested structure: (tag=baseline AND score>0.9) OR (epoch>30)
+        response = client.post(
+            "/api/filter",
+            json={
+                "job_id": job_id,
+                "filter_group": {
+                    "logic": "or",
+                    "items": [
+                        {
+                            "logic": "and",
+                            "items": [
+                                {"column": "tag", "operator": "contains", "value": "baseline"},
+                                {"column": "score", "operator": "gt", "value": "0.9"},
+                            ],
+                        },
+                        {"column": "epoch", "operator": "gt", "value": "30"},
+                    ],
+                },
+                "ordered_paths": ["runs/exp-1", "runs/exp-2", "runs/exp-3"],
+            },
+        )
+
+        assert response.status_code == 200
+        # Matches: exp-3 (baseline AND score > 0.9) and exp-3 also matches (epoch > 30)
+        # exp-2 has epoch=25 (not > 30), so only exp-3 matches
+        assert sorted(response.get_json()["matching_indexes"]) == [2]
     finally:
         with app_module.JOBS_LOCK:
             app_module.JOBS.pop(job_id, None)

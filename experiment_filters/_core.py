@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Sequence, Union
 
 
 _OPERATOR_ALIASES: dict[str, str] = {
@@ -32,6 +32,13 @@ _OPERATOR_ALIASES: dict[str, str] = {
     ">": "gt",
 }
 
+_FILTER_LOGIC_ALIASES: dict[str, str] = {
+    "and": "and",
+    "all": "and",
+    "or": "or",
+    "any": "or",
+}
+
 
 @dataclass(frozen=True)
 class CompiledFilter:
@@ -41,11 +48,26 @@ class CompiledFilter:
     numeric_value: float | None = None
 
 
+@dataclass(frozen=True)
+class FilterGroup:
+    """Represents a group of filters or nested groups combined with AND/OR logic."""
+    logic: str
+    items: tuple[Union[CompiledFilter, FilterGroup], ...] = ()  # Recursive: filters or subgroups
+    negate: bool = False  # When True, invert the result of this group
+
+
 def normalize_operator(operator: Any) -> str:
     normalized = str(operator or "contains").strip().lower()
     if normalized not in _OPERATOR_ALIASES:
         raise ValueError(f"Unsupported filter operator: {operator}")
     return _OPERATOR_ALIASES[normalized]
+
+
+def normalize_filter_logic(filter_logic: Any) -> str:
+    normalized = str(filter_logic or "and").strip().lower()
+    if normalized not in _FILTER_LOGIC_ALIASES:
+        raise ValueError(f"Unsupported filter logic: {filter_logic}")
+    return _FILTER_LOGIC_ALIASES[normalized]
 
 
 def _normalize_text_values(value: Any) -> tuple[str, ...]:
@@ -104,61 +126,99 @@ def _is_missing_value(value: Any) -> bool:
     return value is None or str(value).strip() == ""
 
 
-def row_matches_filters(row: dict[str, Any], filters: Sequence[CompiledFilter]) -> bool:
-    for f in filters:
-        cell_value = row.get(f.column)
+def row_matches_filter(row: dict[str, Any], filter_spec: CompiledFilter) -> bool:
+    cell_value = row.get(filter_spec.column)
 
-        if f.operator == "missing":
-            if not _is_missing_value(cell_value):
-                return False
-            continue
+    if filter_spec.operator == "missing":
+        return _is_missing_value(cell_value)
 
-        if f.operator == "contains":
-            normalized_cell = str(cell_value or "").lower()
-            if not any(tv in normalized_cell for tv in f.text_values):
-                return False
-            continue
+    if filter_spec.operator == "contains":
+        normalized_cell = str(cell_value or "").lower()
+        return any(tv in normalized_cell for tv in filter_spec.text_values)
 
-        if f.operator == "not_contains":
-            normalized_cell = str(cell_value or "").lower()
-            if any(tv in normalized_cell for tv in f.text_values):
-                return False
-            continue
+    if filter_spec.operator == "not_contains":
+        normalized_cell = str(cell_value or "").lower()
+        return not any(tv in normalized_cell for tv in filter_spec.text_values)
 
-        if f.operator == "is_one_of":
-            normalized_cell = str(cell_value or "").strip().lower()
-            if normalized_cell not in f.text_values:
-                return False
-            continue
+    if filter_spec.operator == "is_one_of":
+        normalized_cell = str(cell_value or "").strip().lower()
+        return normalized_cell in filter_spec.text_values
 
-        if f.operator == "is_not_one_of":
-            normalized_cell = str(cell_value or "").strip().lower()
-            if normalized_cell in f.text_values:
-                return False
-            continue
+    if filter_spec.operator == "is_not_one_of":
+        normalized_cell = str(cell_value or "").strip().lower()
+        return normalized_cell not in filter_spec.text_values
 
-        numeric_cell = _coerce_number(cell_value)
-        if numeric_cell is None:
-            return False
+    numeric_cell = _coerce_number(cell_value)
+    if numeric_cell is None:
+        return False
 
-        if f.operator == "lt" and not numeric_cell < float(f.numeric_value):  # type: ignore[arg-type]
-            return False
-        if f.operator == "gt" and not numeric_cell > float(f.numeric_value):  # type: ignore[arg-type]
-            return False
+    if filter_spec.operator == "lt":
+        return numeric_cell < float(filter_spec.numeric_value)  # type: ignore[arg-type]
+    if filter_spec.operator == "gt":
+        return numeric_cell > float(filter_spec.numeric_value)  # type: ignore[arg-type]
+    return False
 
-    return True
+
+def row_matches_filter_or_group(row: dict[str, Any], item: Union[CompiledFilter, FilterGroup]) -> bool:
+    """Recursively evaluate a filter or filter group against a row."""
+    if isinstance(item, CompiledFilter):
+        return row_matches_filter(row, item)
+    # It's a FilterGroup
+    if item.logic == "or":
+        result = any(row_matches_filter_or_group(row, sub_item) for sub_item in item.items)
+    else:
+        result = all(row_matches_filter_or_group(row, sub_item) for sub_item in item.items)
+    return not result if item.negate else result
 
 
 def filter_row_indexes(
-    rows: Sequence[dict[str, Any]], filter_specs: Sequence[dict[str, Any]]
+    rows: Sequence[dict[str, Any]],
+    filter_specs: Sequence[dict[str, Any]],
+    combine_with: str = "and",
 ) -> list[int]:
+    """Evaluate a flat list of filter specs with a global combine operator (legacy API)."""
+    logic = normalize_filter_logic(combine_with)
     compiled = compile_filters(filter_specs)
     if not compiled:
         return list(range(len(rows)))
-    return [i for i, row in enumerate(rows) if row_matches_filters(row, compiled)]
+    group = FilterGroup(logic=logic, items=tuple(compiled))
+    return [i for i, row in enumerate(rows) if row_matches_filter_or_group(row, group)]
+
+
+def filter_row_indexes_by_group(
+    rows: Sequence[dict[str, Any]],
+    filter_group: FilterGroup,
+) -> list[int]:
+    """Evaluate a hierarchical FilterGroup structure."""
+    if not filter_group.items:
+        return list(range(len(rows)))
+    return [i for i, row in enumerate(rows) if row_matches_filter_or_group(row, filter_group)]
+
+
+# Backward compatibility: legacy flat-list filter evaluation
+def row_matches_filters(
+    row: dict[str, Any],
+    filters: Sequence[CompiledFilter],
+    combine_with: str = "and",
+) -> bool:
+    """Legacy: evaluate a flat list of compiled filters with a single combine operator."""
+    logic = normalize_filter_logic(combine_with)
+    if not filters:
+        return True
+    group = FilterGroup(logic=logic, items=tuple(filters))
+    return row_matches_filter_or_group(row, group)
 
 
 def filter_rows(
-    rows: Sequence[dict[str, Any]], filter_specs: Sequence[dict[str, Any]]
+    rows: Sequence[dict[str, Any]],
+    filter_specs: Sequence[dict[str, Any]],
+    combine_with: str = "and",
 ) -> list[dict[str, Any]]:
-    return [rows[i] for i in filter_row_indexes(rows, filter_specs)]
+    return [rows[i] for i in filter_row_indexes(rows, filter_specs, combine_with=combine_with)]
+
+
+def filter_rows_by_group(
+    rows: Sequence[dict[str, Any]],
+    filter_group: FilterGroup,
+) -> list[dict[str, Any]]:
+    return [rows[i] for i in filter_row_indexes_by_group(rows, filter_group)]

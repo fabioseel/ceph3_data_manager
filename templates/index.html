@@ -55,29 +55,33 @@
       <section id="tableControls" class="table-controls hidden">
         <button type="button" id="openColumnManager" class="secondary">Manage Columns</button>
         <button type="button" id="openFilterManager" class="secondary">Manage Filters</button>
+        <button type="button" id="openTextGenerator" class="secondary">Generate Text</button>
       </section>
 
       <section id="filtersPanel" class="panel hidden">
         <div class="panel-head">
-          <strong>Active Filters</strong>
+          <strong>Hierarchical Filters</strong>
           <div class="visibility-actions">
-            <button type="button" id="openAddFilter" class="secondary">Add Filter</button>
             <button type="button" id="toggleFiltersEnabled" class="secondary">Disable Filters</button>
-            <button type="button" id="clearAllFilters" class="secondary">Clear All Filters</button>
+            <button type="button" id="clearAllFilters" class="secondary">Clear All</button>
             <button type="button" id="closeFilterManager" class="secondary">Close</button>
           </div>
         </div>
+        <div id="filterGroupBuilder" class="filter-group-builder">
+          <div id="rootFilterGroup" class="filter-group-node root-group"></div>
+        </div>
         <div id="filterComposer" class="filter-composer hidden">
           <label>
+            Target Group
+            <select id="filterTargetGroupSelect"></select>
+          </label>
+          <label>
             Column
-            <select id="filterColumnSelect" onchange="updateFilterValueOptions()"></select>
+            <select id="filterColumnSelect"></select>
           </label>
           <label>
             Operator
-            <select id="filterOperatorSelect">
-              <option value="contains">Contains</option>
-              <option value="missing">Is Missing</option>
-            </select>
+            <select id="filterOperatorSelect"></select>
           </label>
           <label>
             Value
@@ -85,11 +89,10 @@
             <datalist id="filterValueList"></datalist>
           </label>
           <div class="visibility-actions">
-            <button type="button" id="applyFilter" class="secondary">Apply Filter</button>
+            <button type="button" id="applyFilter" class="secondary">Add Filter</button>
             <button type="button" id="cancelAddFilter" class="secondary">Cancel</button>
           </div>
         </div>
-        <div id="activeFiltersList" class="active-filters-list"></div>
         <div class="filter-settings-io">
           <div class="visibility-actions">
             <button type="button" id="exportFilterSettings" class="secondary">Export YAML</button>
@@ -101,6 +104,60 @@
               id="filterSettingsYaml"
               class="yaml-area"
               placeholder="Exported filter settings and matching experiments will appear here..."
+            ></textarea>
+          </label>
+        </div>
+
+      </section>
+
+      <section id="textGeneratorPanel" class="panel hidden">
+        <div class="panel-head">
+          <strong>Generate Text</strong>
+          <div class="visibility-actions">
+            <button type="button" id="generateFilteredText" class="secondary">Generate Text</button>
+            <button type="button" id="closeTextGenerator" class="secondary">Close</button>
+          </div>
+        </div>
+        <div class="filter-template-io">
+          <div class="panel-head panel-head-inline">
+            <strong>Template</strong>
+          </div>
+          <div class="replacement-variable-section">
+            <div class="panel-head panel-head-inline">
+              <strong>Replace</strong>
+            </div>
+            <p class="helper-text">Create derived variables from a base column by replacing its values. The new variable can then be used in placeholders like <span class="mono-inline">{your_variable}</span>.</p>
+            <div class="replacement-variable-composer">
+              <label>
+                Variable Name
+                <input id="replacementVariableName" placeholder="short_label" />
+              </label>
+              <label>
+                Base Column
+                <select id="replacementBaseColumn"></select>
+              </label>
+              <div class="visibility-actions replacement-actions">
+                <button type="button" id="addReplacementVariable" class="secondary">Add Variable</button>
+              </div>
+            </div>
+            <div id="replacementVariablesList" class="replacement-variables-list"></div>
+          </div>
+          <p class="helper-text">Use placeholders like <span class="mono-inline">{run_name}</span> or <span class="mono-inline">{git_hash}</span>. One block will be generated for each currently filtered row. Derived variables from the Replace section work the same way.</p>
+          <label>
+            Template
+            <textarea
+              id="filteredTextTemplate"
+              class="yaml-area"
+              placeholder="Run: {run_name}\nGit: {git_hash}\nStep: {last_analysis_step}"
+            ></textarea>
+          </label>
+          <label>
+            Generated Output
+            <textarea
+              id="filteredTextOutput"
+              class="yaml-area"
+              placeholder="Generated text for the current filtered rows will appear here..."
+              readonly
             ></textarea>
           </label>
         </div>
@@ -122,6 +179,7 @@
         <div class="visibility-actions">
           <button type="button" id="showAllColumns" class="secondary">Show All Columns</button>
           <button type="button" id="hideConstantColumns" class="secondary">Hide Constant Columns Now</button>
+          <button type="button" id="showNonConstantColumns" class="secondary">Show Non-Constant Columns Now</button>
         </div>
         <div class="column-buckets">
           <section class="column-bucket">
@@ -160,29 +218,41 @@
       const tableControls = document.getElementById("tableControls");
       const openColumnManagerButton = document.getElementById("openColumnManager");
       const openFilterManagerButton = document.getElementById("openFilterManager");
+      const openTextGeneratorButton = document.getElementById("openTextGenerator");
       const autoHideConstantCheckbox = document.getElementById("autoHideConstantInSettings");
 
       const filtersPanel = document.getElementById("filtersPanel");
-      const openAddFilterButton = document.getElementById("openAddFilter");
       const toggleFiltersEnabledButton = document.getElementById("toggleFiltersEnabled");
       const closeFilterManagerButton = document.getElementById("closeFilterManager");
       const clearAllFiltersButton = document.getElementById("clearAllFilters");
+      const filterGroupBuilder = document.getElementById("filterGroupBuilder");
       const filterComposer = document.getElementById("filterComposer");
+      const filterTargetGroupSelect = document.getElementById("filterTargetGroupSelect");
       const filterColumnSelect = document.getElementById("filterColumnSelect");
       const filterOperatorSelect = document.getElementById("filterOperatorSelect");
       const filterValueInput = document.getElementById("filterValueInput");
       const filterValueList = document.getElementById("filterValueList");
       const applyFilterButton = document.getElementById("applyFilter");
       const cancelAddFilterButton = document.getElementById("cancelAddFilter");
-      const activeFiltersList = document.getElementById("activeFiltersList");
       const exportFilterSettingsButton = document.getElementById("exportFilterSettings");
       const importFilterSettingsButton = document.getElementById("importFilterSettings");
       const filterSettingsYaml = document.getElementById("filterSettingsYaml");
+
+      const textGeneratorPanel = document.getElementById("textGeneratorPanel");
+      const generateFilteredTextButton = document.getElementById("generateFilteredText");
+      const closeTextGeneratorButton = document.getElementById("closeTextGenerator");
+      const replacementVariableNameInput = document.getElementById("replacementVariableName");
+      const replacementBaseColumnSelect = document.getElementById("replacementBaseColumn");
+      const addReplacementVariableButton = document.getElementById("addReplacementVariable");
+      const replacementVariablesList = document.getElementById("replacementVariablesList");
+      const filteredTextTemplate = document.getElementById("filteredTextTemplate");
+      const filteredTextOutput = document.getElementById("filteredTextOutput");
 
       const columnManager = document.getElementById("columnManager");
       const closeColumnManagerButton = document.getElementById("closeColumnManager");
       const showAllColumnsButton = document.getElementById("showAllColumns");
       const hideConstantColumnsButton = document.getElementById("hideConstantColumns");
+      const showNonConstantColumnsButton = document.getElementById("showNonConstantColumns");
       const hideSearchMatchesButton = document.getElementById("hideSearchMatches");
       const showSearchMatchesButton = document.getElementById("showSearchMatches");
       const columnSearchInput = document.getElementById("columnSearchInput");
@@ -210,11 +280,15 @@
       let currentMatchingIndexes = [];
       let baseRows = [];
       let visibleColumns = [];
-      let columnFiltersState = {};
+      let rootFilterGroup = { logic: "and", items: [] };
       let openHeaderMenu = null;
       let filterRequestToken = 0;
       let filtersTemporarilyDisabled = false;
+      let replacementVariablesState = [];
       let sortState = { column: null, direction: null };
+      let filterComposerState = { open: false, targetGroupPath: "root" };
+      let collapsedGroupPaths = new Set();
+      let draggedFilterItemPath = null;
       const HIDDEN_COLUMNS_STORAGE_KEY = "ceph3_data_manager.hidden_columns";
 
       function getPrimaryIdColumn() {
@@ -307,14 +381,19 @@
 
       function getConstantColumns() {
         const constants = new Set();
-        if (!currentRows.length) return constants;
+        if (!currentRows.length || !currentMatchingIndexes.length) return constants;
+
+        const visibleRows = currentMatchingIndexes
+          .map((index) => currentRows[index])
+          .filter((row) => row !== undefined);
+        if (!visibleRows.length) return constants;
 
         const primaryIdColumn = getPrimaryIdColumn();
 
         currentColumns.forEach((column) => {
           if (column === primaryIdColumn) return;
-          const firstValue = String(currentRows[0][column] ?? "");
-          const allSame = currentRows.every((row) => String(row[column] ?? "") === firstValue);
+          const firstValue = String(visibleRows[0][column] ?? "");
+          const allSame = visibleRows.every((row) => String(row[column] ?? "") === firstValue);
           if (allSame) constants.add(column);
         });
 
@@ -326,6 +405,19 @@
         const primaryIdColumn = getPrimaryIdColumn();
         // Hide constants on top of current visibility so persisted hidden choices remain hidden.
         visibleColumns = visibleColumns.filter((column) => column === primaryIdColumn || !constants.has(column));
+        persistColumnPreferences();
+      }
+
+      function showNonConstantColumns() {
+        const constants = getConstantColumns();
+        const primaryIdColumn = getPrimaryIdColumn();
+        const currentlyVisible = new Set(visibleColumns);
+
+        // Re-show non-constant columns while preserving current visibility for constant columns.
+        visibleColumns = currentColumns.filter(
+          (column) =>
+            column === primaryIdColumn || currentlyVisible.has(column) || !constants.has(column)
+        );
         persistColumnPreferences();
       }
 
@@ -485,6 +577,494 @@
         return { invalid: `Unsupported filter operator: ${normalizedOperator}` };
       }
 
+      // ====================================================================
+      // HIERARCHICAL FILTER GROUP MANAGEMENT
+      // ====================================================================
+
+      function createFilterItem(column, operator, value) {
+        return { column, operator, value };
+      }
+
+      function createFilterGroup(logic = "and", items = []) {
+        return { logic, items, negate: false };
+      }
+
+      function listGroupPaths(group, path = "root", depth = 0) {
+        const paths = [{ path, depth }];
+        group.items.forEach((item, index) => {
+          if (item && item.logic !== undefined) {
+            paths.push(...listGroupPaths(item, `${path}.${index}`, depth + 1));
+          }
+        });
+        return paths;
+      }
+
+      function getGroupPathLabel(path, depth) {
+        if (path === "root") {
+          return "Root Group";
+        }
+        return `${"  ".repeat(depth)}Group ${path.replace("root.", "")}`;
+      }
+
+      function findGroupByPath(path) {
+        if (path === "root") {
+          return rootFilterGroup;
+        }
+
+        const indexes = path
+          .replace(/^root\.?/, "")
+          .split(".")
+          .filter(Boolean)
+          .map((segment) => Number(segment));
+
+        let current = rootFilterGroup;
+        for (const index of indexes) {
+          if (!Number.isInteger(index) || !current.items[index] || current.items[index].logic === undefined) {
+            return null;
+          }
+          current = current.items[index];
+        }
+        return current;
+      }
+
+      function findParentGroupAndIndexByItemPath(itemPath) {
+        const parts = String(itemPath || "").split("::");
+        if (parts.length !== 2) {
+          return null;
+        }
+
+        const group = findGroupByPath(parts[0]);
+        const index = Number(parts[1]);
+        if (!group || !Number.isInteger(index) || index < 0 || index >= group.items.length) {
+          return null;
+        }
+
+        return { group, index };
+      }
+
+      function getItemPath(groupPath, index) {
+        return `${groupPath}::${index}`;
+      }
+
+      function moveFilterItemToGroup(itemPath, targetGroupPath) {
+        const source = findParentGroupAndIndexByItemPath(itemPath);
+        const targetGroup = findGroupByPath(targetGroupPath);
+        if (!source || !targetGroup) {
+          return false;
+        }
+
+        const [item] = source.group.items.splice(source.index, 1);
+        if (!item || item.logic !== undefined) {
+          // Only move filter items with drag and drop for now.
+          if (item) {
+            source.group.items.splice(source.index, 0, item);
+          }
+          return false;
+        }
+
+        targetGroup.items.push(item);
+        return true;
+      }
+
+      function toggleGroupCollapsed(groupPath) {
+        if (collapsedGroupPaths.has(groupPath)) {
+          collapsedGroupPaths.delete(groupPath);
+        } else {
+          collapsedGroupPaths.add(groupPath);
+        }
+      }
+
+      function getVisibleFilterColumns() {
+        const visibleSet = new Set(visibleColumns);
+        const visibleKeys = visibleColumns.length
+          ? computeColumnMergeGroups(baseRows, visibleColumns).map((group) => group.key)
+          : [];
+        const hiddenColumns = currentColumns.filter((column) => !visibleSet.has(column));
+        return [...visibleKeys, ...hiddenColumns];
+      }
+
+      function populateFilterColumnSelect(preferredColumn = "") {
+        const selectedColumn = preferredColumn || filterColumnSelect.value;
+        const visibleSet = new Set(visibleColumns);
+        const visibleKeys = visibleColumns.length
+          ? computeColumnMergeGroups(baseRows, visibleColumns).map((group) => group.key)
+          : [];
+        const hiddenColumns = currentColumns.filter((column) => !visibleSet.has(column));
+
+        filterColumnSelect.innerHTML = "";
+
+        const addGroup = (columns, label) => {
+          if (!columns.length) {
+            return;
+          }
+          const optgroup = document.createElement("optgroup");
+          optgroup.label = label;
+          columns.forEach((column) => {
+            const option = document.createElement("option");
+            option.value = column;
+            option.textContent = column;
+            optgroup.appendChild(option);
+          });
+          filterColumnSelect.appendChild(optgroup);
+        };
+
+        addGroup(visibleKeys, "Visible");
+        addGroup(hiddenColumns, "Hidden");
+
+        const allColumns = [...visibleKeys, ...hiddenColumns];
+        if (!allColumns.length) {
+          return;
+        }
+
+        filterColumnSelect.value = selectedColumn && allColumns.includes(selectedColumn) ? selectedColumn : allColumns[0];
+      }
+
+      function populateFilterTargetGroupSelect(preferredPath = "") {
+        const selectedPath = preferredPath || filterTargetGroupSelect.value || "root";
+        const groupPaths = listGroupPaths(rootFilterGroup);
+        filterTargetGroupSelect.innerHTML = "";
+
+        groupPaths.forEach(({ path, depth }) => {
+          const option = document.createElement("option");
+          option.value = path;
+          option.textContent = getGroupPathLabel(path, depth);
+          filterTargetGroupSelect.appendChild(option);
+        });
+
+        const allowedPaths = new Set(groupPaths.map((entry) => entry.path));
+        filterTargetGroupSelect.value = allowedPaths.has(selectedPath) ? selectedPath : "root";
+      }
+
+      function updateFilterValueOptions() {
+        const selectedColumn = filterColumnSelect.value;
+        if (!selectedColumn) {
+          return;
+        }
+
+        const selectedOperator = populateOperatorSelect(filterOperatorSelect, selectedColumn, filterOperatorSelect.value || "contains");
+        updateFilterValueInputState(filterValueInput, selectedOperator, true);
+
+        const values = new Set();
+        currentRows.forEach((row) => {
+          const value = String(row[selectedColumn] ?? "").trim();
+          if (value) {
+            values.add(value);
+          }
+        });
+
+        filterValueList.innerHTML = "";
+        Array.from(values).sort().forEach((value) => {
+          const option = document.createElement("option");
+          option.value = value;
+          filterValueList.appendChild(option);
+        });
+      }
+
+      function openFilterComposerForGroup(groupPath = "root", prefillColumn = "") {
+        filterComposerState.open = true;
+        filterComposerState.targetGroupPath = groupPath;
+
+        populateFilterTargetGroupSelect(groupPath);
+        populateFilterColumnSelect(prefillColumn);
+        updateFilterValueOptions();
+
+        filterComposer.classList.remove("hidden");
+        if (!filterValueInput.disabled) {
+          filterValueInput.focus();
+        }
+      }
+
+      function closeFilterComposer() {
+        filterComposerState.open = false;
+        filterComposer.classList.add("hidden");
+        filterValueInput.value = "";
+      }
+
+      function applyFilterFromComposer() {
+        const targetPath = filterTargetGroupSelect.value || "root";
+        const targetGroup = findGroupByPath(targetPath);
+        if (!targetGroup) {
+          setError("Selected target group is no longer available.");
+          return;
+        }
+
+        const column = String(filterColumnSelect.value || "").trim();
+        if (!column || !currentColumns.includes(column)) {
+          setError("Choose a valid column.");
+          return;
+        }
+
+        const normalized = normalizeFilterDefinition(filterOperatorSelect.value, filterValueInput.value);
+        if (normalized && normalized.invalid) {
+          setError(normalized.invalid);
+          return;
+        }
+        if (!normalized) {
+          setError("Filter value is required for this operator.");
+          return;
+        }
+
+        const newFilter = {
+          column,
+          operator: normalized.operator,
+        };
+        if (normalized.operator !== "missing") {
+          newFilter.value = normalized.value;
+        }
+
+        targetGroup.items.push(newFilter);
+        filterComposerState.targetGroupPath = targetPath;
+        filterValueInput.value = "";
+        buildActiveFiltersPanel();
+        applyFilters();
+      }
+
+      function renderFilterGroup(group, depth = 0, groupPath = "root") {
+        const container = document.createElement("div");
+        container.className = "filter-group";
+        container.dataset.depth = depth;
+        container.dataset.groupPath = groupPath;
+        if (collapsedGroupPaths.has(groupPath)) {
+          container.classList.add("is-collapsed");
+        }
+        if (group.negate) {
+          container.classList.add("is-negated");
+        }
+        if (depth > 0) {
+          container.style.marginLeft = `${depth * 20}px`;
+          container.style.borderLeft = group.negate ? "2px solid #e55" : "2px solid #bbb";
+          container.style.paddingLeft = "12px";
+        }
+
+        // Group header with logic selector
+        const header = document.createElement("div");
+        header.className = "filter-group-header";
+
+        const collapseButton = document.createElement("button");
+        collapseButton.type = "button";
+        collapseButton.className = "secondary group-collapse-button";
+        collapseButton.textContent = collapsedGroupPaths.has(groupPath) ? "+" : "-";
+        collapseButton.title = collapsedGroupPaths.has(groupPath) ? "Expand group" : "Collapse group";
+        collapseButton.addEventListener("click", () => {
+          toggleGroupCollapsed(groupPath);
+          renderRootFilterGroup();
+        });
+
+        const logicLabel = document.createElement("label");
+        logicLabel.className = "group-logic-label";
+        logicLabel.textContent = depth === 0 ? "Root logic:" : "Combine with:";
+
+        const logicSelect = document.createElement("select");
+        logicSelect.className = "group-logic-select";
+        logicSelect.value = group.logic;
+        logicSelect.innerHTML = '<option value="and">AND</option><option value="or">OR</option>';
+        logicSelect.addEventListener("change", () => {
+          group.logic = logicSelect.value;
+          applyFilters();
+        });
+
+        const negateButton = document.createElement("button");
+        negateButton.type = "button";
+        negateButton.className = "secondary group-negate-button" + (group.negate ? " is-active" : "");
+        negateButton.textContent = "NOT";
+        negateButton.title = group.negate ? "Remove NOT (stop negating this group)" : "Negate the entire group (NOT)";
+        negateButton.addEventListener("click", () => {
+          group.negate = !group.negate;
+          refreshFilters();
+        });
+
+        header.appendChild(collapseButton);
+        header.appendChild(logicLabel);
+        header.appendChild(logicSelect);
+        header.appendChild(negateButton);
+
+        // Action buttons
+        const actions = document.createElement("div");
+        actions.className = "group-actions";
+
+        const addFilterBtn = document.createElement("button");
+        addFilterBtn.type = "button";
+        addFilterBtn.className = "secondary";
+        addFilterBtn.textContent = "+ Filter";
+        addFilterBtn.addEventListener("click", () => openFilterComposerForGroup(groupPath));
+
+        const addGroupBtn = document.createElement("button");
+        addGroupBtn.type = "button";
+        addGroupBtn.className = "secondary";
+        addGroupBtn.textContent = "+ Group";
+        addGroupBtn.addEventListener("click", () => {
+          const newGroup = createFilterGroup("and", []);
+          group.items.push(newGroup);
+          refreshFilters();
+        });
+
+        actions.appendChild(addFilterBtn);
+        actions.appendChild(addGroupBtn);
+
+        if (depth > 0) {
+          const removeBtn = document.createElement("button");
+          removeBtn.type = "button";
+          removeBtn.className = "secondary";
+          removeBtn.textContent = "✕ Remove";
+          removeBtn.addEventListener("click", () => {
+            // Find and remove this group from parent
+            removeGroupFromParent(group, rootFilterGroup);
+            refreshFilters();
+          });
+          actions.appendChild(removeBtn);
+        }
+
+        header.appendChild(actions);
+        container.appendChild(header);
+
+        // Items list
+        const itemsList = document.createElement("div");
+        itemsList.className = "filter-items-list";
+        itemsList.dataset.dropTargetGroup = groupPath;
+        itemsList.addEventListener("dragover", (event) => {
+          if (!draggedFilterItemPath) {
+            return;
+          }
+          event.preventDefault();
+          itemsList.classList.add("is-drop-target");
+        });
+        itemsList.addEventListener("dragleave", () => {
+          itemsList.classList.remove("is-drop-target");
+        });
+        itemsList.addEventListener("drop", (event) => {
+          if (!draggedFilterItemPath) {
+            return;
+          }
+          event.preventDefault();
+          itemsList.classList.remove("is-drop-target");
+          const moved = moveFilterItemToGroup(draggedFilterItemPath, groupPath);
+          draggedFilterItemPath = null;
+          if (moved) {
+            buildActiveFiltersPanel();
+            applyFilters();
+          }
+        });
+
+        if (collapsedGroupPaths.has(groupPath)) {
+          container.appendChild(itemsList);
+          return container;
+        }
+
+        group.items.forEach((item, index) => {
+          if (item.logic !== undefined) {
+            // It's a nested group
+            itemsList.appendChild(renderFilterGroup(item, depth + 1, `${groupPath}.${index}`));
+          } else {
+            // It's a filter
+            const filterEl = renderFilterItem(item, group);
+            filterEl.draggable = true;
+            filterEl.dataset.itemPath = getItemPath(groupPath, index);
+            filterEl.addEventListener("dragstart", () => {
+              draggedFilterItemPath = filterEl.dataset.itemPath || null;
+              filterEl.classList.add("is-dragging");
+            });
+            filterEl.addEventListener("dragend", () => {
+              draggedFilterItemPath = null;
+              filterEl.classList.remove("is-dragging");
+            });
+            itemsList.appendChild(filterEl);
+          }
+        });
+
+        if (group.items.length === 0 && depth > 0) {
+          const empty = document.createElement("p");
+          empty.className = "empty-mini";
+          empty.textContent = "No items in group";
+          itemsList.appendChild(empty);
+        }
+
+        container.appendChild(itemsList);
+        return container;
+      }
+
+      function renderFilterItem(filterItem, parentGroup) {
+        const el = document.createElement("div");
+        el.className = "filter-item";
+
+        const text = document.createElement("span");
+        text.className = "filter-item-text";
+        const valueLabel = filterItem.operator === "missing" ? "is missing" : formatFilterLabel({ operator: filterItem.operator, value: filterItem.value });
+        text.textContent = `${filterItem.column} ${valueLabel}`;
+
+        const removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "secondary";
+        removeBtn.textContent = "✕";
+        removeBtn.addEventListener("click", () => {
+          const idx = parentGroup.items.indexOf(filterItem);
+          if (idx !== -1) {
+            parentGroup.items.splice(idx, 1);
+          }
+          refreshFilters();
+        });
+
+        el.appendChild(text);
+        el.appendChild(removeBtn);
+        return el;
+      }
+
+      function removeGroupFromParent(targetGroup, searchGroup) {
+        const idx = searchGroup.items.indexOf(targetGroup);
+        if (idx !== -1) {
+          searchGroup.items.splice(idx, 1);
+          return true;
+        }
+        for (const item of searchGroup.items) {
+          if (item.logic !== undefined && removeGroupFromParent(targetGroup, item)) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      function renderRootFilterGroup() {
+        const container = document.getElementById("rootFilterGroup");
+        const preservedTargetPath = filterTargetGroupSelect.value || filterComposerState.targetGroupPath || "root";
+        container.innerHTML = "";
+        container.appendChild(renderFilterGroup(rootFilterGroup, 0));
+        populateFilterTargetGroupSelect(preservedTargetPath);
+      }
+
+      function refreshFilters() {
+        buildActiveFiltersPanel();
+        applyFilters();
+      }
+
+      function serializeFilterGroupForApi() {
+        return {
+          filter_group: serializeGroup(rootFilterGroup),
+        };
+      }
+
+      function serializeGroup(group) {
+        const out = {
+          logic: group.logic,
+          items: group.items.map((item) => {
+            if (item.logic !== undefined) {
+              return serializeGroup(item);
+            } else {
+              const spec = {
+                column: item.column,
+                operator: item.operator,
+              };
+              if (item.operator !== "missing") {
+                spec.value = item.value;
+              }
+              return spec;
+            }
+          }),
+        };
+        if (group.negate) {
+          out.negate = true;
+        }
+        return out;
+      }
+
       function setColumnFilter(column, operator, value) {
         const nextFilter = normalizeFilterDefinition(operator, value);
         if (nextFilter && nextFilter.invalid) {
@@ -493,12 +1073,29 @@
         }
 
         if (nextFilter) {
-          columnFiltersState[column] = nextFilter;
+          // Check if a filter for this column already exists; update it, otherwise add it
+          const existingIdx = rootFilterGroup.items.findIndex(
+            (item) => item.logic === undefined && item.column === column
+          );
+          if (existingIdx !== -1) {
+            if (nextFilter.operator === undefined) {
+              rootFilterGroup.items.splice(existingIdx, 1);
+            } else {
+              rootFilterGroup.items[existingIdx] = { column, operator: nextFilter.operator, value: nextFilter.value };
+            }
+          } else {
+            rootFilterGroup.items.push({ column, operator: nextFilter.operator, value: nextFilter.value });
+          }
         } else {
-          delete columnFiltersState[column];
+          // Remove existing filter for this column
+          const existingIdx = rootFilterGroup.items.findIndex(
+            (item) => item.logic === undefined && item.column === column
+          );
+          if (existingIdx !== -1) {
+            rootFilterGroup.items.splice(existingIdx, 1);
+          }
         }
 
-        syncFilterInputs(column);
         buildActiveFiltersPanel();
         applyFilters();
         return true;
@@ -549,7 +1146,16 @@
         if (filterState.operator === "missing") {
           return "{ op: missing }";
         }
-        if (filterState.operator === "not_contains" || filterState.operator === "is_one_of" || filterState.operator === "is_not_one_of" || filterState.operator === "lt" || filterState.operator === "gt") {
+        if (filterState.operator === "is_one_of") {
+          if (Array.isArray(filterState.value)) {
+            if (filterState.value.length === 1) {
+              return yamlQuote(filterState.value[0]);
+            }
+            return `{ op: is_one_of, value: [${filterState.value.map((item) => yamlQuote(item)).join(", ")}] }`;
+          }
+          return yamlQuote(filterState.value);
+        }
+        if (filterState.operator === "not_contains" || filterState.operator === "is_not_one_of" || filterState.operator === "lt" || filterState.operator === "gt") {
           const v = Array.isArray(filterState.value)
             ? `[${filterState.value.map((item) => yamlQuote(item)).join(", ")}]`
             : yamlQuote(filterState.value);
@@ -562,9 +1168,10 @@
       }
 
       function syncFilterInputs(column) {
-        const filterState = columnFiltersState[column];
-        const nextOperator = filterState?.operator || "contains";
-        const nextValue = formatFilterValueForInput(filterState);
+        // Find current filter state for this column from the hierarchical group
+        const filterItem = findFilterForColumn(column);
+        const nextOperator = filterItem?.operator || "contains";
+        const nextValue = filterItem ? formatFilterValueForInput(filterItem) : "";
 
         document.querySelectorAll(`[data-filter-operator-column="${CSS.escape(column)}"]`).forEach((element) => {
           populateOperatorSelect(element, column, nextOperator);
@@ -576,14 +1183,21 @@
             element.value = nextValue;
           }
         });
+      }
 
-        if (filterColumnSelect.value === column) {
-          populateOperatorSelect(filterOperatorSelect, column, nextOperator);
-          updateFilterValueInputState(filterValueInput, nextOperator, true);
-          if (filterValueInput.value !== nextValue) {
-            filterValueInput.value = nextValue;
+      function findFilterForColumn(column) {
+        function search(group) {
+          for (const item of group.items) {
+            if (item.logic !== undefined) {
+              const found = search(item);
+              if (found) return found;
+            } else if (item.column === column) {
+              return item;
+            }
           }
+          return null;
         }
+        return search(rootFilterGroup);
       }
 
       function getSearchMatchingColumns() {
@@ -736,18 +1350,199 @@
         return trimmed;
       }
 
-      function serializeFiltersForApi() {
-        return Object.entries(columnFiltersState).map(([column, filterState]) => {
-          const payload = { column, operator: filterState.operator };
-          if (filterState.operator !== "missing") {
-            payload.value = filterState.value;
-          }
-          return payload;
+      function getCurrentMatchingExperimentPaths() {
+        return currentMatchingIndexes.map((index) => String(currentRows[index]?.__s3_path || "")).filter(Boolean).sort();
+      }
+
+      function getCurrentMatchingRows() {
+        return currentMatchingIndexes
+          .map((index) => currentRows[index])
+          .filter((row) => row && typeof row === "object");
+      }
+
+      function getSortedCurrentColumns() {
+        return [...currentColumns].sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }));
+      }
+
+      function populateReplacementBaseColumnSelect(preferredColumn = "") {
+        const columns = getSortedCurrentColumns();
+        replacementBaseColumnSelect.innerHTML = "";
+
+        columns.forEach((column) => {
+          const option = document.createElement("option");
+          option.value = column;
+          option.textContent = column;
+          replacementBaseColumnSelect.appendChild(option);
+        });
+
+        if (!columns.length) {
+          return;
+        }
+
+        if (preferredColumn && columns.includes(preferredColumn)) {
+          replacementBaseColumnSelect.value = preferredColumn;
+        } else if (!replacementBaseColumnSelect.value) {
+          replacementBaseColumnSelect.value = columns[0];
+        }
+      }
+
+      function getReplacementSourceValues(baseColumn) {
+        const values = new Set();
+        baseRows.forEach((row) => {
+          values.add(String(row?.[baseColumn] ?? ""));
+        });
+        return Array.from(values).sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }));
+      }
+
+      function buildTemplateContext(row) {
+        const context = { ...row };
+        replacementVariablesState.forEach((variable) => {
+          const sourceValue = String(row?.[variable.baseColumn] ?? "");
+          const hasReplacement = Object.prototype.hasOwnProperty.call(variable.replacements, sourceValue);
+          context[variable.name] = hasReplacement ? String(variable.replacements[sourceValue]) : sourceValue;
+        });
+        return context;
+      }
+
+      function renderReplacementVariables() {
+        replacementVariablesList.innerHTML = "";
+
+        if (!replacementVariablesState.length) {
+          const empty = document.createElement("p");
+          empty.className = "empty-mini";
+          empty.textContent = "No replacement variables yet.";
+          replacementVariablesList.appendChild(empty);
+          return;
+        }
+
+        replacementVariablesState.forEach((variable, variableIndex) => {
+          const card = document.createElement("div");
+          card.className = "replacement-variable-card";
+
+          const header = document.createElement("div");
+          header.className = "replacement-variable-header";
+
+          const title = document.createElement("strong");
+          title.textContent = `${variable.name} ← ${variable.baseColumn}`;
+
+          const removeButton = document.createElement("button");
+          removeButton.type = "button";
+          removeButton.className = "secondary";
+          removeButton.textContent = "Remove";
+          removeButton.addEventListener("click", () => {
+            replacementVariablesState = replacementVariablesState.filter((_, index) => index !== variableIndex);
+            renderReplacementVariables();
+          });
+
+          header.appendChild(title);
+          header.appendChild(removeButton);
+          card.appendChild(header);
+
+          const help = document.createElement("p");
+          help.className = "helper-text replacement-variable-help";
+          help.textContent = "Leave a replacement empty to keep the original base-column value.";
+          card.appendChild(help);
+
+          const valuesGrid = document.createElement("div");
+          valuesGrid.className = "replacement-values-grid";
+
+          getReplacementSourceValues(variable.baseColumn).forEach((sourceValue) => {
+            const row = document.createElement("label");
+            row.className = "replacement-value-row";
+
+            const source = document.createElement("span");
+            source.className = "replacement-source-value";
+            source.textContent = sourceValue || "(empty)";
+            source.title = sourceValue || "(empty)";
+
+            const input = document.createElement("input");
+            input.value = variable.replacements[sourceValue] ?? "";
+            input.placeholder = sourceValue || "(empty)";
+            input.addEventListener("input", () => {
+              const nextValue = input.value;
+              if (nextValue === "") {
+                delete variable.replacements[sourceValue];
+              } else {
+                variable.replacements[sourceValue] = nextValue;
+              }
+            });
+
+            row.appendChild(source);
+            row.appendChild(input);
+            valuesGrid.appendChild(row);
+          });
+
+          card.appendChild(valuesGrid);
+          replacementVariablesList.appendChild(card);
         });
       }
 
-      function getCurrentMatchingExperimentPaths() {
-        return currentMatchingIndexes.map((index) => String(currentRows[index]?.__s3_path || "")).filter(Boolean).sort();
+      function addReplacementVariable() {
+        const variableName = String(replacementVariableNameInput.value || "").trim();
+        const baseColumn = String(replacementBaseColumnSelect.value || "").trim();
+
+        if (!variableName) {
+          setError("Replacement variable name is required.");
+          return;
+        }
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variableName)) {
+          setError("Replacement variable names must start with a letter or underscore and contain only letters, numbers, and underscores.");
+          return;
+        }
+        if (!baseColumn) {
+          setError("Choose a base column for the replacement variable.");
+          return;
+        }
+        if (currentColumns.includes(variableName)) {
+          setError("Replacement variable name must not match an existing column name.");
+          return;
+        }
+        if (replacementVariablesState.some((variable) => variable.name === variableName)) {
+          setError("Replacement variable name already exists.");
+          return;
+        }
+
+        replacementVariablesState.push({ name: variableName, baseColumn, replacements: {} });
+        replacementVariableNameInput.value = "";
+        replacementVariableNameInput.focus();
+        renderReplacementVariables();
+        setError("");
+      }
+
+      function interpolateTemplateForRow(template, row) {
+        const context = buildTemplateContext(row);
+        return String(template || "").replace(/\{([^{}]+)\}/g, (match, rawColumnName) => {
+          const columnName = String(rawColumnName || "").trim();
+          if (!columnName) {
+            return match;
+          }
+          if (!Object.prototype.hasOwnProperty.call(context, columnName)) {
+            return match;
+          }
+          return String(context[columnName] ?? "");
+        });
+      }
+
+      function generateFilteredText() {
+        const template = String(filteredTextTemplate.value || "");
+        const matchingRows = getCurrentMatchingRows();
+
+        if (!template.trim()) {
+          filteredTextOutput.value = "";
+          setError("Enter a template before generating text.");
+          return;
+        }
+
+        if (!matchingRows.length) {
+          filteredTextOutput.value = "";
+          setError("No filtered rows available for text generation.");
+          return;
+        }
+
+        filteredTextOutput.value = matchingRows
+          .map((row) => interpolateTemplateForRow(template, row))
+          .join("\n\n");
+        setError("");
       }
 
       function splitInlineYamlItems(value) {
@@ -860,6 +1655,189 @@
         return result;
       }
 
+      function isFlatFilterGroup(group) {
+        return !group?.negate && Array.isArray(group?.items) && group.items.every((item) => item && item.logic === undefined);
+      }
+
+      function parseFlatFilterEntry(entryText) {
+        const filterMatch = entryText.match(/^([A-Za-z0-9_.\[\]-]+):\s*(.*)$/);
+        if (!filterMatch) {
+          return null;
+        }
+
+        const column = filterMatch[1];
+        const rawValue = filterMatch[2];
+        if (!currentColumns.includes(column)) {
+          return null;
+        }
+
+        const parsedMapping = parseInlineYamlMapping(rawValue);
+        if (parsedMapping) {
+          const operator = parsedMapping.op || parsedMapping.operator || "contains";
+          const value = Object.prototype.hasOwnProperty.call(parsedMapping, "value") ? parsedMapping.value : "";
+          const normalized = normalizeFilterDefinition(operator, value);
+          if (!normalized || normalized.invalid) {
+            return null;
+          }
+          const item = { column, operator: normalized.operator };
+          if (normalized.operator !== "missing") {
+            item.value = normalized.value;
+          }
+          return item;
+        }
+
+        const parsedList = parseInlineYamlList(rawValue);
+        const normalized = normalizeFilterDefinition("contains", parsedList !== null ? parsedList : unquoteYamlScalar(rawValue));
+        if (!normalized || normalized.invalid) {
+          return null;
+        }
+
+        const item = { column, operator: normalized.operator };
+        if (normalized.operator !== "missing") {
+          item.value = normalized.value;
+        }
+        return item;
+      }
+
+      function normalizeFilterLogicValue(value) {
+        return String(value || "and").trim().toLowerCase() === "or" ? "or" : "and";
+      }
+
+      function leadingSpaceCount(value) {
+        const match = String(value || "").match(/^\s*/);
+        return match ? match[0].length : 0;
+      }
+
+      function appendFilterItemsAsYamlLines(items, lines, bulletIndent) {
+        items.forEach((item) => {
+          if (item && item.logic !== undefined) {
+            lines.push(`${" ".repeat(bulletIndent)}- logic: ${normalizeFilterLogicValue(item.logic)}`);
+            if (item.negate) {
+              lines.push(`${" ".repeat(bulletIndent + 2)}negate: true`);
+            }
+            lines.push(`${" ".repeat(bulletIndent + 2)}items:`);
+            appendFilterItemsAsYamlLines(item.items || [], lines, bulletIndent + 4);
+          } else if (item && item.column) {
+            lines.push(`${" ".repeat(bulletIndent)}- ${item.column}: ${formatFilterValueForYaml(item)}`);
+          }
+        });
+      }
+
+      function parseHumanReadableFilterGroupLines(groupLines) {
+        const lines = Array.isArray(groupLines) ? groupLines : [];
+
+        function parseItems(startIndex, bulletIndent) {
+          const items = [];
+          let index = startIndex;
+
+          while (index < lines.length) {
+            const rawLine = lines[index];
+            const trimmed = String(rawLine || "").trim();
+            if (!trimmed || trimmed.startsWith("#")) {
+              index += 1;
+              continue;
+            }
+
+            const indent = leadingSpaceCount(rawLine);
+            if (indent < bulletIndent) {
+              break;
+            }
+            if (indent !== bulletIndent || !trimmed.startsWith("- ")) {
+              break;
+            }
+
+            const entry = trimmed.slice(2).trim();
+            if (entry.startsWith("logic:")) {
+              const logic = normalizeFilterLogicValue(unquoteYamlScalar(entry.slice("logic:".length)));
+              const subgroup = { logic, items: [], negate: false };
+              index += 1;
+
+              while (index < lines.length) {
+                const nextRaw = lines[index];
+                const nextTrimmed = String(nextRaw || "").trim();
+                if (!nextTrimmed || nextTrimmed.startsWith("#")) {
+                  index += 1;
+                  continue;
+                }
+
+                const nextIndent = leadingSpaceCount(nextRaw);
+                if (nextIndent < bulletIndent + 2) {
+                  break;
+                }
+
+                if (nextIndent === bulletIndent + 2 && nextTrimmed.startsWith("negate:")) {
+                  subgroup.negate = unquoteYamlScalar(nextTrimmed.slice("negate:".length)).trim() === "true";
+                  index += 1;
+                  continue;
+                }
+
+                if (nextIndent === bulletIndent + 2 && nextTrimmed === "items:") {
+                  const parsed = parseItems(index + 1, bulletIndent + 4);
+                  subgroup.items = parsed.items;
+                  index = parsed.nextIndex;
+                  break;
+                }
+
+                if (nextIndent <= bulletIndent + 2) {
+                  break;
+                }
+
+                index += 1;
+              }
+
+              items.push(subgroup);
+              continue;
+            }
+
+            const parsedFlatItem = parseFlatFilterEntry(entry);
+            if (parsedFlatItem) {
+              items.push(parsedFlatItem);
+            }
+            index += 1;
+          }
+
+          return { items, nextIndex: index };
+        }
+
+        let logic = "and";
+        let negate = false;
+        let items = [];
+        let index = 0;
+
+        while (index < lines.length) {
+          const rawLine = lines[index];
+          const line = String(rawLine || "").trim();
+          if (!line || line.startsWith("#")) {
+            index += 1;
+            continue;
+          }
+
+          const indent = leadingSpaceCount(rawLine);
+          if (indent === 2 && line.startsWith("logic:")) {
+            logic = normalizeFilterLogicValue(unquoteYamlScalar(line.slice("logic:".length)));
+            index += 1;
+            continue;
+          }
+
+          if (indent === 2 && line.startsWith("negate:")) {
+            negate = unquoteYamlScalar(line.slice("negate:".length)).trim() === "true";
+            index += 1;
+            continue;
+          }
+
+          if (indent === 2 && line === "items:") {
+            const parsed = parseItems(index + 1, 4);
+            items = parsed.items;
+            index = parsed.nextIndex;
+            continue;
+          }
+
+          index += 1;
+        }
+
+        return { logic, items, negate };
+      }
+
       function exportFilterSettingsYaml() {
         const formData = new FormData(controlsForm);
         const bucket = String(formData.get("bucket") || "").trim();
@@ -867,7 +1845,6 @@
           .split(/[\n,]+/)
           .map((p) => p.trim())
           .filter(Boolean);
-        const activeFilters = Object.entries(columnFiltersState).filter(([, value]) => value);
 
         const lines = [];
         lines.push("bucket: " + yamlQuote(bucket));
@@ -877,13 +1854,26 @@
         } else {
           lines.push("  []");
         }
-        lines.push("filters:");
-        if (activeFilters.length === 0) {
-          lines.push("  []");
+
+        if (isFlatFilterGroup(rootFilterGroup)) {
+          lines.push(`filter_logic: ${normalizeFilterLogicValue(rootFilterGroup.logic)}`);
+          lines.push("filters:");
+          if (!rootFilterGroup.items.length) {
+            lines.push("  []");
+          } else {
+            rootFilterGroup.items.forEach((item) => {
+              lines.push(`  - ${item.column}: ${formatFilterValueForYaml(item)}`);
+            });
+          }
         } else {
-          activeFilters.forEach(([column, value]) => {
-            lines.push(`  - ${column}: ${formatFilterValueForYaml(value)}`);
-          });
+          // Human-readable nested group format.
+          lines.push("filter_group:");
+          lines.push(`  logic: ${normalizeFilterLogicValue(rootFilterGroup.logic)}`);
+          if (rootFilterGroup.negate) {
+            lines.push("  negate: true");
+          }
+          lines.push("  items:");
+          appendFilterItemsAsYamlLines(rootFilterGroup.items || [], lines, 4);
         }
 
         lines.push("matching_experiments:");
@@ -906,238 +1896,208 @@
           return;
         }
 
-        const nextFilters = {};
-        let inFiltersSection = false;
-        let inMatchingExperimentsSection = false;
-        let inPrefixesSection = false;
+        let importedFilterGroup = null;
+        const importedFlatItems = [];
+        let importedFilterLogic = "and";
         const importedMatchingPaths = [];
         const importedPrefixes = [];
         let importedBucket = null;
 
-        const parseFilterEntry = (entryText) => {
-          const filterMatch = entryText.match(/^([A-Za-z0-9_.\[\]-]+):\s*(.*)$/);
-          if (!filterMatch) {
-            return;
-          }
+        let inFilterGroupSection = false;
+        let inFiltersSection = false;
+        let inMatchingExperimentsSection = false;
+        let inPrefixesSection = false;
+        let filterGroupJsonLines = [];
 
-          const column = filterMatch[1];
-          const rawValue = filterMatch[2];
-          if (!currentColumns.includes(column)) {
-            return;
-          }
+        const lines = text.split(/\r?\n/);
 
-          const parsedMapping = parseInlineYamlMapping(rawValue);
-          if (parsedMapping) {
-            const operator = parsedMapping.op || parsedMapping.operator || "contains";
-            const value = Object.prototype.hasOwnProperty.call(parsedMapping, "value") ? parsedMapping.value : "";
-            const normalized = normalizeFilterDefinition(operator, value);
-            if (normalized && !normalized.invalid) {
-              nextFilters[column] = normalized;
-            }
-            return;
-          }
-
-          const parsedList = parseInlineYamlList(rawValue);
-          const normalized = normalizeFilterDefinition("contains", parsedList !== null ? parsedList : unquoteYamlScalar(rawValue));
-          if (normalized && !normalized.invalid) {
-            nextFilters[column] = normalized;
-          }
-        };
-
-        text.split(/\r?\n/).forEach((rawLine) => {
+        for (let i = 0; i < lines.length; i++) {
+          const rawLine = lines[i];
           const line = rawLine.trim();
+
           if (!line || line.startsWith("#")) {
-            return;
+            continue;
           }
 
-          if (line === "filters:") {
-            inFiltersSection = true;
+          if (line === "bucket:" || line.startsWith("bucket: ")) {
+            importedBucket = unquoteYamlScalar(line.substring(7).trim());
+            inFilterGroupSection = false;
+            inFiltersSection = false;
             inMatchingExperimentsSection = false;
             inPrefixesSection = false;
-            return;
-          }
-
-          if (line === "matching_experiments:" || line === "experiments:") {
-            inMatchingExperimentsSection = true;
-            inFiltersSection = false;
-            inPrefixesSection = false;
-            return;
+            continue;
           }
 
           if (line === "prefixes:") {
             inPrefixesSection = true;
+            inFilterGroupSection = false;
             inFiltersSection = false;
             inMatchingExperimentsSection = false;
-            return;
+            continue;
           }
 
-          if (inPrefixesSection) {
-            if (line.startsWith("-")) {
-              importedPrefixes.push(unquoteYamlScalar(line.replace(/^-\s*/, "")));
-              return;
-            }
+          if (line === "filters:") {
+            inFiltersSection = true;
+            inFilterGroupSection = false;
+            inMatchingExperimentsSection = false;
             inPrefixesSection = false;
+            continue;
           }
 
-          // Parse top-level scalars (bucket, prefix) before section handlers.
-          if (!inFiltersSection && !inMatchingExperimentsSection) {
-            const scalarMatch = line.match(/^(bucket|prefix):\s*(.+)$/);
-            if (scalarMatch) {
-              const val = unquoteYamlScalar(scalarMatch[2]);
-              if (scalarMatch[1] === "bucket") importedBucket = val;
-              if (scalarMatch[1] === "prefix") importedPrefixes.push(val);
-              return;
+          if (line.startsWith("filter_logic:")) {
+            const logicRaw = unquoteYamlScalar(line.substring("filter_logic:".length));
+            importedFilterLogic = normalizeFilterLogicValue(logicRaw);
+            continue;
+          }
+
+          if (line === "filter_group:") {
+            const groupBlockLines = [];
+            i += 1;
+            while (i < lines.length) {
+              const nextRawLine = lines[i];
+              const nextLine = String(nextRawLine || "").trim();
+              const nextIndent = leadingSpaceCount(nextRawLine);
+
+              if (nextLine && !nextLine.startsWith("#") && nextIndent === 0) {
+                i -= 1;
+                break;
+              }
+
+              groupBlockLines.push(nextRawLine);
+              i += 1;
             }
+
+            importedFilterGroup = parseHumanReadableFilterGroupLines(groupBlockLines);
+            inFilterGroupSection = false;
+            inFiltersSection = false;
+            inMatchingExperimentsSection = false;
+            inPrefixesSection = false;
+            continue;
+          }
+
+          if (line === "filter_group: |") {
+            inFilterGroupSection = true;
+            inFiltersSection = false;
+            inPrefixesSection = false;
+            inMatchingExperimentsSection = false;
+            filterGroupJsonLines = [];
+            continue;
+          }
+
+          if (line === "matching_experiments:") {
+            inMatchingExperimentsSection = true;
+            inFilterGroupSection = false;
+            inFiltersSection = false;
+            inPrefixesSection = false;
+            if (filterGroupJsonLines.length > 0) {
+              try {
+                const jsonStr = filterGroupJsonLines.join("\n");
+                importedFilterGroup = JSON.parse(jsonStr);
+              } catch (err) {
+                setError(`Invalid filter group JSON: ${err}`);
+                return;
+              }
+            }
+            continue;
+          }
+
+          if (inPrefixesSection && line.startsWith("- ")) {
+            importedPrefixes.push(unquoteYamlScalar(line.substring(2)));
+            continue;
           }
 
           if (inFiltersSection) {
             if (line === "[]") {
-              return;
+              continue;
             }
-            parseFilterEntry(line.startsWith("-") ? line.replace(/^-\s*/, "") : line);
+            if (line.startsWith("- ")) {
+              const parsedEntry = parseFlatFilterEntry(line.replace(/^-\s*/, ""));
+              if (parsedEntry) {
+                importedFlatItems.push(parsedEntry);
+              }
+            }
+            continue;
+          }
+
+          if (inFilterGroupSection) {
+            filterGroupJsonLines.push(rawLine.substring(2)); // Remove YAML indentation
+            continue;
+          }
+
+          if (inMatchingExperimentsSection && line.startsWith("- ")) {
+            importedMatchingPaths.push(unquoteYamlScalar(line.substring(2)));
+            continue;
+          }
+        }
+
+        // If we were in filter group section at end of file, parse it now
+        if (filterGroupJsonLines.length > 0 && inFilterGroupSection) {
+          try {
+            const jsonStr = filterGroupJsonLines.join("\n");
+            importedFilterGroup = JSON.parse(jsonStr);
+          } catch (err) {
+            setError(`Invalid filter group JSON: ${err}`);
             return;
           }
+        }
 
-          if (inMatchingExperimentsSection) {
-            const pathMatch = line.match(/^- \s*(.+)$/);
-            if (pathMatch) {
-              importedMatchingPaths.push(unquoteYamlScalar(pathMatch[1]));
-              return;
-            }
-          }
-        });
+        if (!importedFilterGroup) {
+          importedFilterGroup = {
+            logic: importedFilterLogic,
+            items: importedFlatItems,
+          };
+        }
 
-        columnFiltersState = nextFilters;
-
-        // Restore bucket and prefixes into the settings form.
         if (importedBucket !== null) {
           const bucketInput = controlsForm.querySelector('input[name="bucket"]');
-          if (bucketInput) bucketInput.value = importedBucket;
+          if (bucketInput) {
+            bucketInput.value = importedBucket;
+          }
         }
         if (importedPrefixes.length > 0) {
           const prefixArea = controlsForm.querySelector('[name="prefix"]');
-          if (prefixArea) prefixArea.value = importedPrefixes.join("\n");
+          if (prefixArea) {
+            prefixArea.value = importedPrefixes.join("\n");
+          }
         }
 
-        sortRows();
-        buildActiveFiltersPanel();
-        renderTable();
-        await applyFilters();
+        // Apply imported filter group
+        if (importedFilterGroup) {
+          rootFilterGroup = importedFilterGroup;
+          collapsedGroupPaths = new Set();
+          buildActiveFiltersPanel();
+          renderTable();
+          await applyFilters();
 
-        const currentMatchingPaths = getCurrentMatchingExperimentPaths();
-        if (importedMatchingPaths.length > 0) {
-          const importedSorted = [...new Set(importedMatchingPaths)].sort();
-          const isUpToDate =
-            importedSorted.length === currentMatchingPaths.length &&
-            importedSorted.every((path, index) => path === currentMatchingPaths[index]);
-          setError(isUpToDate ? "Imported YAML matches the current experiment list." : "Imported YAML is stale: matching experiments differ from the current result.");
-        } else {
-          setError("Imported filters. No saved experiment list found to validate.");
+          const currentMatchingPaths = getCurrentMatchingExperimentPaths();
+          if (importedMatchingPaths.length > 0) {
+            const importedSorted = [...new Set(importedMatchingPaths)].sort();
+            const currentSorted = [...currentMatchingPaths].sort();
+            const isUpToDate =
+              importedSorted.length === currentSorted.length &&
+              importedSorted.every((path, index) => path === currentSorted[index]);
+            setError(
+              isUpToDate
+                ? "Imported YAML matches the current experiment list."
+                : "Imported YAML is stale: matching experiments differ from the current result."
+            );
+          } else {
+            setError("Imported filters. No saved experiment list found to validate.");
+          }
         }
-      }
-
-      function populateFilterColumnSelect(preferredColumn = "") {
-        const selectedColumn = preferredColumn || filterColumnSelect.value;
-        const visibleSet = new Set(visibleColumns);
-
-        // For visible columns, deduplicate using merge groups so only the representative key appears.
-        const visibleKeys = visibleColumns.length
-          ? computeColumnMergeGroups(baseRows, visibleColumns).map((g) => g.key)
-          : [];
-
-        // Hidden columns: everything in currentColumns not currently visible.
-        const hiddenCols = currentColumns.filter((c) => !visibleSet.has(c));
-
-        filterColumnSelect.innerHTML = "";
-
-        const addGroup = (cols, label) => {
-          if (!cols.length) return;
-          const optgroup = document.createElement("optgroup");
-          optgroup.label = label;
-          cols.forEach((column) => {
-            const option = document.createElement("option");
-            option.value = column;
-            option.textContent = column;
-            optgroup.appendChild(option);
-          });
-          filterColumnSelect.appendChild(optgroup);
-        };
-
-        addGroup(visibleKeys, "Visible");
-        addGroup(hiddenCols, "Hidden");
-
-        const allCols = [...visibleKeys, ...hiddenCols];
-        if (!allCols.length) {
-          return;
-        }
-
-        if (selectedColumn && allCols.includes(selectedColumn)) {
-          filterColumnSelect.value = selectedColumn;
-        } else {
-          filterColumnSelect.value = allCols[0];
-        }
-      }
-
-      function updateFilterValueOptions() {
-        const selectedColumn = filterColumnSelect.value;
-        if (!selectedColumn) return;
-
-        const existingFilter = columnFiltersState[selectedColumn];
-        const selectedOperator = populateOperatorSelect(filterOperatorSelect, selectedColumn, existingFilter?.operator || filterOperatorSelect.value || "contains");
-        updateFilterValueInputState(filterValueInput, selectedOperator, true);
-        filterValueInput.value = existingFilter && existingFilter.operator === selectedOperator ? formatFilterValueForInput(existingFilter) : "";
-
-        const values = new Set();
-        currentRows.forEach((row) => {
-          const val = String(row[selectedColumn] ?? "").trim();
-          if (val) values.add(val);
-        });
-
-        const sortedValues = Array.from(values).sort();
-        filterValueList.innerHTML = "";
-        sortedValues.forEach((val) => {
-          const option = document.createElement("option");
-          option.value = val;
-          filterValueList.appendChild(option);
-        });
       }
 
       function buildActiveFiltersPanel() {
-        activeFiltersList.innerHTML = "";
-        const activeFilters = Object.entries(columnFiltersState);
-
-        if (filtersTemporarilyDisabled && activeFilters.length) {
+        if (filtersTemporarilyDisabled && rootFilterGroup.items.length > 0) {
           const note = document.createElement("p");
           note.className = "empty-mini";
           note.textContent = "Filters are temporarily disabled.";
-          activeFiltersList.appendChild(note);
+          const container = document.getElementById("rootFilterGroup");
+          if (container.firstChild) {
+            container.insertBefore(note, container.firstChild);
+          }
         }
-
-        if (!activeFilters.length) {
-          const empty = document.createElement("p");
-          empty.className = "empty-mini";
-          empty.textContent = "No active filters.";
-          activeFiltersList.appendChild(empty);
-          return;
-        }
-
-        activeFilters.forEach(([column, value]) => {
-          const chip = document.createElement("div");
-          chip.className = "filter-chip";
-
-          const text = document.createElement("span");
-          text.textContent = `${column}: ${formatFilterLabel(value)}`;
-
-          const remove = document.createElement("button");
-          remove.type = "button";
-          remove.className = "secondary";
-          remove.textContent = "Remove";
-          remove.addEventListener("click", () => setColumnFilter(column, "contains", ""));
-
-          chip.appendChild(text);
-          chip.appendChild(remove);
-          activeFiltersList.appendChild(chip);
-        });
+        renderRootFilterGroup();
       }
 
       function updateFiltersToggleButton() {
@@ -1147,23 +2107,11 @@
           : "Temporarily show all rows without deleting active filters";
       }
 
-      function openFilterComposer(prefillColumn) {
-        populateFilterColumnSelect(prefillColumn);
-        if (prefillColumn) {
-          filterColumnSelect.value = prefillColumn;
-        }
-        updateFilterValueOptions();
-        filterComposer.classList.remove("hidden");
-        if (!filterValueInput.disabled) {
-          filterValueInput.focus();
-        }
-      }
-
-      function closeFilterComposer() {
-        filterComposer.classList.add("hidden");
-        populateOperatorSelect(filterOperatorSelect, filterColumnSelect.value || currentColumns[0] || getPrimaryIdColumn(), "contains");
-        filterValueInput.value = "";
-        updateFilterValueInputState(filterValueInput, filterOperatorSelect.value, true);
+      function hideAuxPanels() {
+        columnManager.classList.add("hidden");
+        filtersPanel.classList.add("hidden");
+        textGeneratorPanel.classList.add("hidden");
+        closeFilterComposer();
       }
 
       // group = { key: string, columns: string[] }  (key is the representative column)
@@ -1212,10 +2160,11 @@
         menuButton.type = "button";
         menuButton.className = "header-menu-button header-icon-button secondary";
         menuButton.textContent = "☰";
-        menuButton.title = columnFiltersState[column]
+        const colFilterItem = findFilterForColumn(column);
+        menuButton.title = colFilterItem
           ? "Column actions (filter active)"
           : "Column actions";
-        if (columnFiltersState[column]) {
+        if (colFilterItem) {
           menuButton.classList.add("has-filter");
         }
 
@@ -1257,7 +2206,7 @@
         const filterLabel = document.createElement("label");
         filterLabel.textContent = "Filter";
 
-        const filterState = columnFiltersState[column];
+        const filterState = findFilterForColumn(column);
 
         const filterOperator = document.createElement("select");
         filterOperator.dataset.filterOperatorColumn = column;
@@ -1312,7 +2261,7 @@
         addFilterButton.textContent = "Open In Filters Panel";
         addFilterButton.addEventListener("click", () => {
           filtersPanel.classList.remove("hidden");
-          openFilterComposer(column);
+          openFilterComposerForGroup("root", column);
           menu.classList.add("hidden");
           openHeaderMenu = null;
         });
@@ -1442,9 +2391,6 @@
         tableHead.innerHTML = "";
         tableBody.innerHTML = "";
 
-        // Keep filter column ordering in sync with current visibility state.
-        populateFilterColumnSelect();
-
         const activeColumns = visibleColumns.length ? visibleColumns : [getPrimaryIdColumn()];
         // Merge columns that are identical across all experiments.
         const groups = computeColumnMergeGroups(baseRows, activeColumns);
@@ -1497,19 +2443,20 @@
         }
 
         const token = ++filterRequestToken;
-        const filterSpecs = filtersTemporarilyDisabled ? [] : serializeFiltersForApi();
+        const hasActiveFilters = filtersTemporarilyDisabled ? false : rootFilterGroup.items.length > 0;
         let matchingIndexes = currentRows.map((_, index) => index);
 
-        if (activeDatasetJobId && filterSpecs.length) {
+        if (activeDatasetJobId && hasActiveFilters) {
           try {
+            const payload = {
+              job_id: activeDatasetJobId,
+              ...serializeFilterGroupForApi(),
+              ordered_paths: currentRows.map((row) => String(row.__s3_path || "")).filter(Boolean),
+            };
             const response = await fetch("/api/filter", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                job_id: activeDatasetJobId,
-                filters: filterSpecs,
-                ordered_paths: currentRows.map((row) => String(row.__s3_path || "")).filter(Boolean),
-              }),
+              body: JSON.stringify(payload),
             });
             const data = await response.json();
             if (!response.ok) {
@@ -1523,6 +2470,7 @@
             setError(String(err));
             matchingIndexes = [];
           }
+
         }
 
         if (token !== filterRequestToken) {
@@ -1553,12 +2501,16 @@
         currentRows = [...rows];
         currentMatchingIndexes = rows.map((_, index) => index);
         applyPersistedHiddenColumns();
-        columnFiltersState = {};
+        rootFilterGroup = createFilterGroup("and", []);
+        filterComposerState = { open: false, targetGroupPath: "root" };
+        collapsedGroupPaths = new Set();
         filtersTemporarilyDisabled = false;
+        replacementVariablesState = [];
         updateFiltersToggleButton();
         sortState = { column: null, direction: null };
-
-        closeSettingsMenu();
+        populateFilterColumnSelect();
+        populateFilterTargetGroupSelect("root");
+        closeFilterComposer();
 
         if (autoHideConstantCheckbox.checked) {
           hideConstantColumns();
@@ -1570,7 +2522,7 @@
         filtersPanel.classList.toggle("hidden", rows.length === 0);
         countLine.classList.toggle("hidden", rows.length === 0);
         columnManager.classList.add("hidden");
-        closeFilterComposer();
+        textGeneratorPanel.classList.add("hidden");
         emptyState.textContent = rows.length === 0 ? "No experiments found." : "";
 
         if (rows.length === 0) {
@@ -1578,7 +2530,6 @@
         }
 
         sortRows();
-        populateFilterColumnSelect();
         buildColumnManager();
         buildActiveFiltersPanel();
         renderTable();
@@ -1672,8 +2623,7 @@
       openColumnManagerButton.addEventListener("click", () => {
         const shouldOpen = columnManager.classList.contains("hidden");
         if (shouldOpen) {
-          filtersPanel.classList.add("hidden");
-          closeFilterComposer();
+          hideAuxPanels();
         }
         buildColumnManager();
         columnManager.classList.toggle("hidden", !shouldOpen);
@@ -1686,18 +2636,29 @@
       openFilterManagerButton.addEventListener("click", () => {
         const shouldOpen = filtersPanel.classList.contains("hidden");
         if (shouldOpen) {
-          columnManager.classList.add("hidden");
+          hideAuxPanels();
           populateFilterColumnSelect();
+          populateFilterTargetGroupSelect(filterComposerState.targetGroupPath || "root");
         }
         filtersPanel.classList.toggle("hidden", !shouldOpen);
-        if (!shouldOpen) {
-          closeFilterComposer();
-        }
       });
 
       closeFilterManagerButton.addEventListener("click", () => {
         filtersPanel.classList.add("hidden");
         closeFilterComposer();
+      });
+
+      openTextGeneratorButton.addEventListener("click", () => {
+        const shouldOpen = textGeneratorPanel.classList.contains("hidden");
+        if (shouldOpen) {
+          hideAuxPanels();
+          populateReplacementBaseColumnSelect(replacementBaseColumnSelect.value);
+        }
+        textGeneratorPanel.classList.toggle("hidden", !shouldOpen);
+      });
+
+      closeTextGeneratorButton.addEventListener("click", () => {
+        textGeneratorPanel.classList.add("hidden");
       });
 
       showAllColumnsButton.addEventListener("click", () => {
@@ -1709,6 +2670,12 @@
 
       hideConstantColumnsButton.addEventListener("click", () => {
         hideConstantColumns();
+        buildColumnManager();
+        renderTable();
+      });
+
+      showNonConstantColumnsButton.addEventListener("click", () => {
+        showNonConstantColumns();
         buildColumnManager();
         renderTable();
       });
@@ -1728,7 +2695,8 @@
       });
 
       clearAllFiltersButton.addEventListener("click", () => {
-        columnFiltersState = {};
+        rootFilterGroup = createFilterGroup("and", []);
+        collapsedGroupPaths = new Set();
         buildActiveFiltersPanel();
         renderTable();
       });
@@ -1741,20 +2709,15 @@
       });
 
       columnSearchInput.addEventListener("input", buildColumnManager);
+      filterColumnSelect.addEventListener("change", updateFilterValueOptions);
       filterOperatorSelect.addEventListener("change", () => updateFilterValueInputState(filterValueInput, filterOperatorSelect.value, true));
-
-      openAddFilterButton.addEventListener("click", () => openFilterComposer());
+      applyFilterButton.addEventListener("click", applyFilterFromComposer);
       cancelAddFilterButton.addEventListener("click", closeFilterComposer);
-
-      applyFilterButton.addEventListener("click", () => {
-        const applied = setColumnFilter(filterColumnSelect.value, filterOperatorSelect.value, filterValueInput.value);
-        if (applied) {
-          closeFilterComposer();
-        }
-      });
 
       exportFilterSettingsButton.addEventListener("click", exportFilterSettingsYaml);
       importFilterSettingsButton.addEventListener("click", importFilterSettingsYaml);
+      generateFilteredTextButton.addEventListener("click", generateFilteredText);
+      addReplacementVariableButton.addEventListener("click", addReplacementVariable);
 
       autoHideConstantCheckbox.addEventListener("change", () => {
         if (autoHideConstantCheckbox.checked) {

@@ -11,7 +11,7 @@ from uuid import uuid4
 import boto3
 import botocore
 from botocore.config import Config
-from experiment_filters import filter_row_indexes
+from experiment_filters import filter_row_indexes, filter_row_indexes_by_group, normalize_filter_logic, FilterGroup, CompiledFilter, compile_filters
 from flask import Flask, jsonify, render_template, request
 from omegaconf import OmegaConf
 import yaml
@@ -115,6 +115,18 @@ def normalize_override(override: str) -> str:
     return value
 
 
+def override_key(override: str) -> str:
+    key, _, _ = override.partition("=")
+    return key.strip()
+
+
+def is_hydra_choice_override(override: str, choice_keys: set[str]) -> bool:
+    key = override_key(override)
+    if not key or "." in key or "[" in key:
+        return False
+    return key in choice_keys
+
+
 def experiment_id_from_key(key: str) -> str:
     lower_key = key.lower()
     for marker in ("/.hydra/", "/hydra/", "/config/"):
@@ -122,6 +134,71 @@ def experiment_id_from_key(key: str) -> str:
         if marker_index != -1:
             return key[:marker_index]
     return key.rsplit("/", 1)[0] if "/" in key else key
+
+
+def display_experiment_id(experiment_id: str) -> str:
+    normalized = experiment_id.rstrip("/")
+    if "/" not in normalized:
+        return normalized
+    return normalized.rsplit("/", 1)[-1]
+
+
+def build_filter_group_from_payload(payload: Any) -> FilterGroup | None:
+    """Build a FilterGroup from API payload. Supports nested group structure or flat list.
+    
+    Payload can be:
+    - { "filters": [...], "combine_with": "and" }  (legacy flat list)
+    - { "filter_group": {...nested structure...} }  (new nested groups)
+    """
+    # Check for new nested format
+    if "filter_group" in payload:
+        return _deserialize_filter_group(payload["filter_group"])
+    
+    # Legacy flat list format
+    filters = payload.get("filters") or []
+    combine_with_raw = payload.get("combine_with", payload.get("filter_logic", "and"))
+    combine_with = normalize_filter_logic(combine_with_raw)
+    
+    if not filters:
+        return None
+    
+    compiled = compile_filters(filters)
+    return FilterGroup(logic=combine_with, items=tuple(compiled))
+
+
+def _deserialize_filter_group(data: Any) -> FilterGroup:
+    """Recursively deserialize a filter group from dict representation."""
+    if not isinstance(data, dict):
+        raise ValueError("Filter group must be a dict")
+    
+    logic = normalize_filter_logic(data.get("logic", "and"))
+    negate = bool(data.get("negate", False))
+    items_data = data.get("items", [])
+    
+    if not isinstance(items_data, list):
+        raise ValueError("Filter group items must be a list")
+    
+    items = []
+    for item_data in items_data:
+        if not isinstance(item_data, dict):
+            raise ValueError("Filter group item must be a dict")
+        
+        # Check if it's a nested group or a filter spec
+        if "logic" in item_data:
+            # It's a nested group
+            items.append(_deserialize_filter_group(item_data))
+        else:
+            # It's a filter spec
+            if "column" not in item_data:
+                raise ValueError("Filter spec must have 'column'")
+            try:
+                compiled = compile_filters([item_data])
+                if compiled:
+                    items.append(compiled[0])
+            except ValueError as e:
+                raise ValueError(f"Invalid filter spec: {e}")
+    
+    return FilterGroup(logic=logic, items=tuple(items), negate=negate)
 
 
 def display_experiment_id(experiment_id: str) -> str:
@@ -224,10 +301,17 @@ def merge_experiment_config(
         else:
             hydra_obj = OmegaConf.create({"hydra": hydra_data})
 
+    choice_keys = set()
+    choices = OmegaConf.select(hydra_obj, "hydra.runtime.choices")
+    if choices is not None and hasattr(choices, "keys"):
+        choice_keys = {str(key) for key in choices.keys()}
+
     if files.overrides_key:
         overrides_data = read_yaml_from_s3(s3_client, bucket=bucket, key=files.overrides_key) or []
         if isinstance(overrides_data, list):
             normalized = [normalize_override(str(item)) for item in overrides_data if str(item).strip()]
+            if choice_keys:
+                normalized = [item for item in normalized if not is_hydra_choice_override(item, choice_keys)]
             if normalized:
                 overrides_obj = OmegaConf.from_dotlist(normalized)
 
@@ -490,13 +574,10 @@ def api_status(job_id: str) -> Any:
 def api_filter() -> Any:
     payload = request.get_json(silent=True) or {}
     job_id = str(payload.get("job_id", "")).strip()
-    filter_specs = payload.get("filters") or []
     ordered_paths = payload.get("ordered_paths") or []
 
     if not job_id:
         return jsonify({"error": "job_id is required"}), 400
-    if not isinstance(filter_specs, list):
-        return jsonify({"error": "filters must be a list"}), 400
     if not isinstance(ordered_paths, list):
         return jsonify({"error": "ordered_paths must be a list"}), 400
 
@@ -513,7 +594,12 @@ def api_filter() -> Any:
         ordered_rows = [rows_by_path[path] for path in map(str, ordered_paths) if path in rows_by_path]
 
     try:
-        matching_indexes = filter_row_indexes(ordered_rows, filter_specs)
+        # Try new nested format first, fall back to legacy flat list
+        filter_group = build_filter_group_from_payload(payload)
+        if filter_group:
+            matching_indexes = filter_row_indexes_by_group(ordered_rows, filter_group)
+        else:
+            matching_indexes = list(range(len(ordered_rows)))
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
 
