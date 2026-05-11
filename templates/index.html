@@ -1155,16 +1155,22 @@
           }
           return yamlQuote(filterState.value);
         }
+        if (filterState.operator === "contains") {
+          const v = Array.isArray(filterState.value)
+            ? `[${filterState.value.map((item) => yamlQuote(item)).join(", ")}]`
+            : yamlQuote(filterState.value);
+          return `{ op: contains, value: ${v} }`;
+        }
         if (filterState.operator === "not_contains" || filterState.operator === "is_not_one_of" || filterState.operator === "lt" || filterState.operator === "gt") {
           const v = Array.isArray(filterState.value)
             ? `[${filterState.value.map((item) => yamlQuote(item)).join(", ")}]`
             : yamlQuote(filterState.value);
           return `{ op: ${filterState.operator}, value: ${v} }`;
         }
-        if (Array.isArray(filterState.value)) {
-          return `[${filterState.value.map((item) => yamlQuote(item)).join(", ")}]`;
-        }
-        return yamlQuote(filterState.value);
+        const fallback = Array.isArray(filterState.value)
+          ? `[${filterState.value.map((item) => yamlQuote(item)).join(", ")}]`
+          : yamlQuote(filterState.value);
+        return `{ op: ${filterState.operator}, value: ${fallback} }`;
       }
 
       function syncFilterInputs(column) {
@@ -1687,7 +1693,8 @@
         }
 
         const parsedList = parseInlineYamlList(rawValue);
-        const normalized = normalizeFilterDefinition("contains", parsedList !== null ? parsedList : unquoteYamlScalar(rawValue));
+        const inferredOperator = "is_one_of";
+        const normalized = normalizeFilterDefinition(inferredOperator, parsedList !== null ? parsedList : unquoteYamlScalar(rawValue));
         if (!normalized || normalized.invalid) {
           return null;
         }

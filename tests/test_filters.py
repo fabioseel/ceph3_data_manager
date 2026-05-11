@@ -137,7 +137,7 @@ def test_parse_filter_settings_extracts_bucket_prefix_and_filters() -> None:
     assert settings["matching_experiments"] == ["s3://mybucket/runs/exp-1"]
 
     filters = settings["filters"]
-    assert {"column": "tag", "operator": "contains", "value": "baseline"} in filters
+    assert {"column": "tag", "operator": "is_one_of", "value": "baseline"} in filters
     assert {"column": "score", "operator": "gt", "value": "0.9"} in filters
     assert {"column": "notes", "operator": "missing"} in filters
     assert {"column": "label", "operator": "not_contains", "value": "debug"} in filters
@@ -192,6 +192,19 @@ def test_dump_filter_settings_omits_is_one_of_for_single_value() -> None:
     assert '- tag: "baseline"' in text
 
 
+def test_dump_filter_settings_writes_contains_explicitly() -> None:
+    settings = {
+        "bucket": "mb",
+        "prefix": "p",
+        "filters": [
+            {"column": "tag", "operator": "contains", "value": ["base", "aug"]},
+        ],
+    }
+    text = dump_filter_settings(settings)
+
+    assert '{ op: contains, value: ["base", "aug"] }' in text
+
+
 def test_dump_filter_settings_produces_empty_list_when_no_filters() -> None:
     settings = {"bucket": "b", "prefix": "", "filters": [], "matching_experiments": []}
     text = dump_filter_settings(settings)
@@ -202,7 +215,7 @@ def test_dump_filter_settings_produces_empty_list_when_no_filters() -> None:
 def test_parse_filter_settings_handles_list_value_shorthand() -> None:
     yaml_text = 'filters:\n  - tag: ["base", "aug"]\n'
     settings = parse_filter_settings(yaml_text)
-    assert settings["filters"][0] == {"column": "tag", "operator": "contains", "value": ["base", "aug"]}
+    assert settings["filters"][0] == {"column": "tag", "operator": "is_one_of", "value": ["base", "aug"]}
 
 
 # ---------------------------------------------------------------------------

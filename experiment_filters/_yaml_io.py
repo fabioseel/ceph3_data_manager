@@ -14,7 +14,7 @@ The canonical YAML format is::
       - s3://mybucket/my/prefix/run-2
 
 ``filters`` entries are list items, each a single-key mapping.  The value is
-either a plain scalar / list (shorthand for ``contains``), or an inline mapping
+either a plain scalar / list (shorthand for ``is_one_of``), or an inline mapping
 with ``op`` (required) and ``value`` (required for all operators except
 ``missing``).
 """
@@ -76,17 +76,17 @@ def _serialize_filter_value(spec: FilterSpec) -> str:
             return f"{{ op: {op}, value: [{items}] }}"
         return _yaml_quote(str(value))
 
-    if op in ("lt", "gt", "not_contains", "is_not_one_of"):
+    if op in ("contains", "lt", "gt", "not_contains", "is_not_one_of"):
         if isinstance(value, list):
             items = ", ".join(_yaml_quote(str(v)) for v in value)
             return f"{{ op: {op}, value: [{items}] }}"
         return f"{{ op: {op}, value: {_yaml_quote(str(value))} }}"
 
-    # contains — plain scalar or list
+    # Unknown operators are serialized explicitly to preserve semantics.
     if isinstance(value, list):
         items = ", ".join(_yaml_quote(str(v)) for v in value)
-        return f"[{items}]"
-    return _yaml_quote(str(value))
+        return f"{{ op: {op}, value: [{items}] }}"
+    return f"{{ op: {op}, value: {_yaml_quote(str(value))} }}"
 
 
 # ---------------------------------------------------------------------------
@@ -170,8 +170,10 @@ def _parse_filter_entry(entry_text: str, known_columns: set[str] | None = None) 
         return spec
 
     parsed_list = _parse_inline_list(raw_value)
-    value_or_list: Any = parsed_list if parsed_list is not None else _unquote(raw_value)
-    return {"column": column, "operator": "contains", "value": value_or_list}
+    if parsed_list is not None:
+        return {"column": column, "operator": "is_one_of", "value": parsed_list}
+
+    return {"column": column, "operator": "is_one_of", "value": _unquote(raw_value)}
 
 
 def _iter_filter_specs(text: str, known_columns: set[str] | None = None) -> Iterator[FilterSpec]:
