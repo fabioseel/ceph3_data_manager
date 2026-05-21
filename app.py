@@ -1,10 +1,11 @@
 import os
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from configparser import ConfigParser
 from dataclasses import dataclass
-from threading import Lock, Thread
+from threading import Lock, Thread, local
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +21,8 @@ import yaml
 app = Flask(__name__)
 JOBS: dict[str, dict[str, Any]] = {}
 JOBS_LOCK = Lock()
+_resolve_lock = Lock()
+_thread_local = local()
 
 
 @dataclass
@@ -134,13 +137,6 @@ def experiment_id_from_key(key: str) -> str:
         if marker_index != -1:
             return key[:marker_index]
     return key.rsplit("/", 1)[0] if "/" in key else key
-
-
-def display_experiment_id(experiment_id: str) -> str:
-    normalized = experiment_id.rstrip("/")
-    if "/" not in normalized:
-        return normalized
-    return normalized.rsplit("/", 1)[-1]
 
 
 def build_filter_group_from_payload(payload: Any) -> FilterGroup | None:
@@ -281,6 +277,15 @@ def create_s3_client(region: str | None = None, endpoint_url: str | None = None)
     return boto3.client("s3", **client_kwargs)
 
 
+def _get_thread_s3_client(region: str | None, endpoint_url: str | None) -> Any:
+    key = (region, endpoint_url)
+    if not hasattr(_thread_local, "clients"):
+        _thread_local.clients = {}
+    if key not in _thread_local.clients:
+        _thread_local.clients[key] = create_s3_client(region=region, endpoint_url=endpoint_url)
+    return _thread_local.clients[key]
+
+
 def merge_experiment_config(
     s3_client: Any,
     bucket: str,
@@ -319,13 +324,15 @@ def merge_experiment_config(
     # run_name can be used by interpolations in config/hydra fields.
     # Force it to the stable experiment display name before resolving.
     merged["run_name"] = display_experiment_id(files.experiment_id)
-    register_interpolation_resolvers(merged)
 
-    try:
-        resolved = OmegaConf.to_container(merged, resolve=True)
-    except Exception:
-        # Fall back to unresolved strings when full resolver coverage is not available.
-        resolved = OmegaConf.to_container(merged, resolve=False)
+    # OmegaConf resolvers are global state; serialize register+resolve so
+    # concurrent threads don't overwrite each other's closures.
+    with _resolve_lock:
+        register_interpolation_resolvers(merged)
+        try:
+            resolved = OmegaConf.to_container(merged, resolve=True)
+        except Exception:
+            resolved = OmegaConf.to_container(merged, resolve=False)
 
     if isinstance(resolved, dict):
         return flatten_dict(resolved)
@@ -401,29 +408,27 @@ def load_experiment_rows(
     should_cancel: Any | None = None,
 ) -> tuple[list[dict[str, str]], list[str], str | None]:
     try:
-        s3_client = create_s3_client(region=region, endpoint_url=endpoint_url)
+        listing_client = create_s3_client(region=region, endpoint_url=endpoint_url)
         effective_prefixes = prefixes if prefixes else [""]
         all_keys: list[str] = []
         seen_keys: set[str] = set()
         for prefix in effective_prefixes:
-            for key in iter_yaml_keys(s3_client, bucket=bucket, prefix=prefix):
+            for key in iter_yaml_keys(listing_client, bucket=bucket, prefix=prefix):
                 if key not in seen_keys:
                     seen_keys.add(key)
                     all_keys.append(key)
         experiments = collect_experiment_files(all_keys)
 
         total = len(experiments)
-        processed = 0
-        rows: list[dict[str, str]] = []
         all_columns: set[str] = {"run_name", "git_hash", "last_analysis_step"}
 
         if progress_callback:
-            progress_callback("loading", processed, total)
+            progress_callback("loading", 0, total)
 
-        for experiment_id in sorted(experiments.keys()):
-            if should_cancel and should_cancel():
-                return [], [], "Cancelled"
+        sorted_ids = sorted(experiments.keys())
 
+        def process_one(experiment_id: str) -> tuple[str, dict[str, str], set[str]]:
+            s3 = _get_thread_s3_client(region, endpoint_url)
             files = experiments[experiment_id]
             row: dict[str, str] = {
                 "run_name": display_experiment_id(experiment_id),
@@ -431,29 +436,39 @@ def load_experiment_rows(
                 "git_hash": "",
                 "last_analysis_step": "",
             }
+            local_columns: set[str] = set()
             try:
-                flat = merge_experiment_config(s3_client, bucket=bucket, files=files)
+                flat = merge_experiment_config(s3, bucket=bucket, files=files)
                 for key, value in flat.items():
                     if key in {"run_name", "experiment_id"}:
-                        # Keep UI identifier stable: never show interpolated run_name from config.
                         continue
                     row[key] = str(value)
-                    all_columns.add(key)
+                    local_columns.add(key)
             except Exception as file_error:
                 row["__error__"] = f"Could not merge config: {file_error}"
-                all_columns.add("__error__")
-
-            # Use shortened experiment path as canonical run_name for display/filtering.
+                local_columns.add("__error__")
             row["run_name"] = display_experiment_id(experiment_id)
+            row["git_hash"] = extract_git_hash_value(s3, bucket=bucket, experiment_id=experiment_id)
+            row["last_analysis_step"] = extract_last_analysis_step(s3, bucket=bucket, experiment_id=experiment_id)
+            return experiment_id, row, local_columns
 
-            row["git_hash"] = extract_git_hash_value(s3_client, bucket=bucket, experiment_id=experiment_id)
-            row["last_analysis_step"] = extract_last_analysis_step(s3_client, bucket=bucket, experiment_id=experiment_id)
+        results: dict[str, dict[str, str]] = {}
+        processed = 0
+        max_workers = min(16, total or 1)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(process_one, eid): eid for eid in sorted_ids}
+            for future in as_completed(futures):
+                if should_cancel and should_cancel():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    return [], [], "Cancelled"
+                eid, row, local_columns = future.result()
+                results[eid] = row
+                all_columns.update(local_columns)
+                processed += 1
+                if progress_callback:
+                    progress_callback("loading", processed, total)
 
-            rows.append(row)
-            processed += 1
-            if progress_callback:
-                progress_callback("loading", processed, total)
-
+        rows = [results[eid] for eid in sorted_ids]
         ordered_columns = ["run_name"] + sorted(c for c in all_columns if c != "run_name")
         return rows, ordered_columns, None
 
@@ -575,11 +590,14 @@ def api_filter() -> Any:
     payload = request.get_json(silent=True) or {}
     job_id = str(payload.get("job_id", "")).strip()
     ordered_paths = payload.get("ordered_paths") or []
+    visible_row_indexes = payload.get("visible_row_indexes")
 
     if not job_id:
         return jsonify({"error": "job_id is required"}), 400
     if not isinstance(ordered_paths, list):
         return jsonify({"error": "ordered_paths must be a list"}), 400
+    if visible_row_indexes is not None and not isinstance(visible_row_indexes, list):
+        return jsonify({"error": "visible_row_indexes must be a list when provided"}), 400
 
     state = get_job_state(job_id)
     if state is None:
@@ -597,7 +615,18 @@ def api_filter() -> Any:
         # Try new nested format first, fall back to legacy flat list
         filter_group = build_filter_group_from_payload(payload)
         if filter_group:
-            matching_indexes = filter_row_indexes_by_group(ordered_rows, filter_group)
+            normalized_visible_indexes = None
+            if visible_row_indexes is not None:
+                normalized_visible_indexes = [
+                    index
+                    for index in (int(value) for value in visible_row_indexes)
+                    if 0 <= index < len(ordered_rows)
+                ]
+            matching_indexes = filter_row_indexes_by_group(
+                ordered_rows,
+                filter_group,
+                visible_row_indexes=normalized_visible_indexes,
+            )
         else:
             matching_indexes = list(range(len(ordered_rows)))
     except ValueError as error:

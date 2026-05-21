@@ -38,6 +38,7 @@ class FilterSpec(TypedDict, total=False):
     column: str
     operator: str
     value: Any
+    use_visible_rows_only: bool
 
 
 class FilterSettings(TypedDict, total=False):
@@ -67,6 +68,15 @@ def _serialize_filter_value(spec: FilterSpec) -> str:
 
     if op == "missing":
         return "{ op: missing }"
+
+    if op in ("in_other_column", "partially_in_other_column"):
+        target_column = str(value or "").strip()
+        if not target_column:
+            return f"{{ op: {op} }}"
+        value_part = f"value: {_yaml_quote(target_column)}"
+        if bool(spec.get("use_visible_rows_only", False)):
+            return f"{{ op: {op}, {value_part}, use_visible_rows_only: true }}"
+        return f"{{ op: {op}, {value_part} }}"
 
     if op == "is_one_of":
         if isinstance(value, list):
@@ -167,6 +177,13 @@ def _parse_filter_entry(entry_text: str, known_columns: set[str] | None = None) 
         spec: FilterSpec = {"column": column, "operator": op}
         if op != "missing":
             spec["value"] = value
+        if op in ("in_other_column", "partially_in_other_column") and "use_visible_rows_only" in mapping:
+            spec["use_visible_rows_only"] = str(mapping["use_visible_rows_only"]).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
         return spec
 
     parsed_list = _parse_inline_list(raw_value)

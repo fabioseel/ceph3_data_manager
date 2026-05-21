@@ -88,6 +88,10 @@
             <input id="filterValueInput" placeholder="or select from dropdown..." list="filterValueList" />
             <datalist id="filterValueList"></datalist>
           </label>
+          <label id="filterVisibleRowsOnlyLabel" class="inline-toggle hidden">
+            <input type="checkbox" id="filterVisibleRowsOnly" />
+            Use only values from visible rows
+          </label>
           <div class="visibility-actions">
             <button type="button" id="applyFilter" class="secondary">Add Filter</button>
             <button type="button" id="cancelAddFilter" class="secondary">Cancel</button>
@@ -232,6 +236,8 @@
       const filterOperatorSelect = document.getElementById("filterOperatorSelect");
       const filterValueInput = document.getElementById("filterValueInput");
       const filterValueList = document.getElementById("filterValueList");
+      const filterVisibleRowsOnlyLabel = document.getElementById("filterVisibleRowsOnlyLabel");
+      const filterVisibleRowsOnly = document.getElementById("filterVisibleRowsOnly");
       const applyFilterButton = document.getElementById("applyFilter");
       const cancelAddFilterButton = document.getElementById("cancelAddFilter");
       const exportFilterSettingsButton = document.getElementById("exportFilterSettings");
@@ -481,6 +487,8 @@
           { value: "not_contains", label: "Does Not Contain" },
           { value: "is_one_of", label: "Is (in)" },
           { value: "is_not_one_of", label: "Is not (in)" },
+          { value: "in_other_column", label: "In Other Column" },
+          { value: "partially_in_other_column", label: "Partially In Other Column" },
           { value: "missing", label: "Is Missing" },
         ];
 
@@ -509,6 +517,14 @@
         return selectedOperator;
       }
 
+      function updateVisibleRowsOnlyControl(operator) {
+        const showControl = operator === "in_other_column" || operator === "partially_in_other_column";
+        filterVisibleRowsOnlyLabel.classList.toggle("hidden", !showControl);
+        if (!showControl) {
+          filterVisibleRowsOnly.checked = false;
+        }
+      }
+
       function updateFilterValueInputState(inputElement, operator, useSuggestions = false) {
         const requiresNoValue = operator === "missing";
         inputElement.disabled = requiresNoValue;
@@ -517,6 +533,16 @@
           inputElement.value = "";
           inputElement.placeholder = "no value required";
           inputElement.removeAttribute("list");
+          return;
+        }
+
+        if (operator === "in_other_column" || operator === "partially_in_other_column") {
+          inputElement.placeholder = "choose target column";
+          if (useSuggestions) {
+            inputElement.setAttribute("list", "filterValueList");
+          } else {
+            inputElement.removeAttribute("list");
+          }
           return;
         }
 
@@ -552,10 +578,28 @@
         return values.length === 1 ? values[0] : values;
       }
 
-      function normalizeFilterDefinition(operator, value) {
+      function normalizeFilterDefinition(operator, value, options = {}) {
         const normalizedOperator = String(operator || "contains").trim().toLowerCase();
         if (normalizedOperator === "missing") {
           return { operator: "missing" };
+        }
+
+        if (normalizedOperator === "in_other_column" || normalizedOperator === "partially_in_other_column") {
+          const targetColumn = String(value || "").trim();
+          if (!targetColumn) {
+            return null;
+          }
+          if (targetColumn === String(options.sourceColumn || "")) {
+            return { invalid: "Target column must be different from the source column." };
+          }
+          if (Array.isArray(options.availableColumns) && !options.availableColumns.includes(targetColumn)) {
+            return { invalid: "Target column must be a valid column name." };
+          }
+          return {
+            operator: normalizedOperator,
+            value: targetColumn,
+            use_visible_rows_only: Boolean(options.useVisibleRowsOnly),
+          };
         }
 
         if (normalizedOperator === "contains" || normalizedOperator === "not_contains" || normalizedOperator === "is_one_of" || normalizedOperator === "is_not_one_of") {
@@ -575,6 +619,10 @@
         }
 
         return { invalid: `Unsupported filter operator: ${normalizedOperator}` };
+      }
+
+      function operatorRequiresValue(operator) {
+        return operator !== "missing";
       }
 
       // ====================================================================
@@ -743,14 +791,21 @@
 
         const selectedOperator = populateOperatorSelect(filterOperatorSelect, selectedColumn, filterOperatorSelect.value || "contains");
         updateFilterValueInputState(filterValueInput, selectedOperator, true);
+        updateVisibleRowsOnlyControl(selectedOperator);
 
         const values = new Set();
-        currentRows.forEach((row) => {
-          const value = String(row[selectedColumn] ?? "").trim();
-          if (value) {
-            values.add(value);
-          }
-        });
+        if (selectedOperator === "in_other_column" || selectedOperator === "partially_in_other_column") {
+          currentColumns
+            .filter((column) => column !== selectedColumn)
+            .forEach((column) => values.add(column));
+        } else {
+          currentRows.forEach((row) => {
+            const value = String(row[selectedColumn] ?? "").trim();
+            if (value) {
+              values.add(value);
+            }
+          });
+        }
 
         filterValueList.innerHTML = "";
         Array.from(values).sort().forEach((value) => {
@@ -778,6 +833,8 @@
         filterComposerState.open = false;
         filterComposer.classList.add("hidden");
         filterValueInput.value = "";
+        filterVisibleRowsOnly.checked = false;
+        updateVisibleRowsOnlyControl("contains");
       }
 
       function applyFilterFromComposer() {
@@ -794,7 +851,11 @@
           return;
         }
 
-        const normalized = normalizeFilterDefinition(filterOperatorSelect.value, filterValueInput.value);
+        const normalized = normalizeFilterDefinition(filterOperatorSelect.value, filterValueInput.value, {
+          sourceColumn: column,
+          availableColumns: currentColumns,
+          useVisibleRowsOnly: filterVisibleRowsOnly.checked,
+        });
         if (normalized && normalized.invalid) {
           setError(normalized.invalid);
           return;
@@ -808,8 +869,11 @@
           column,
           operator: normalized.operator,
         };
-        if (normalized.operator !== "missing") {
+        if (operatorRequiresValue(normalized.operator)) {
           newFilter.value = normalized.value;
+        }
+        if (normalized.operator === "in_other_column" || normalized.operator === "partially_in_other_column") {
+          newFilter.use_visible_rows_only = Boolean(normalized.use_visible_rows_only);
         }
 
         targetGroup.items.push(newFilter);
@@ -1052,8 +1116,11 @@
                 column: item.column,
                 operator: item.operator,
               };
-              if (item.operator !== "missing") {
+              if (operatorRequiresValue(item.operator)) {
                 spec.value = item.value;
+              }
+              if (item.operator === "in_other_column" || item.operator === "partially_in_other_column") {
+                spec.use_visible_rows_only = Boolean(item.use_visible_rows_only);
               }
               return spec;
             }
@@ -1066,7 +1133,10 @@
       }
 
       function setColumnFilter(column, operator, value) {
-        const nextFilter = normalizeFilterDefinition(operator, value);
+        const nextFilter = normalizeFilterDefinition(operator, value, {
+          sourceColumn: column,
+          availableColumns: currentColumns,
+        });
         if (nextFilter && nextFilter.invalid) {
           setError(nextFilter.invalid);
           return false;
@@ -1081,10 +1151,24 @@
             if (nextFilter.operator === undefined) {
               rootFilterGroup.items.splice(existingIdx, 1);
             } else {
-              rootFilterGroup.items[existingIdx] = { column, operator: nextFilter.operator, value: nextFilter.value };
+              const nextItem = { column, operator: nextFilter.operator };
+              if (operatorRequiresValue(nextFilter.operator)) {
+                nextItem.value = nextFilter.value;
+              }
+              if (nextFilter.operator === "in_other_column" || nextFilter.operator === "partially_in_other_column") {
+                nextItem.use_visible_rows_only = Boolean(nextFilter.use_visible_rows_only);
+              }
+              rootFilterGroup.items[existingIdx] = nextItem;
             }
           } else {
-            rootFilterGroup.items.push({ column, operator: nextFilter.operator, value: nextFilter.value });
+            const nextItem = { column, operator: nextFilter.operator };
+            if (operatorRequiresValue(nextFilter.operator)) {
+              nextItem.value = nextFilter.value;
+            }
+            if (nextFilter.operator === "in_other_column" || nextFilter.operator === "partially_in_other_column") {
+              nextItem.use_visible_rows_only = Boolean(nextFilter.use_visible_rows_only);
+            }
+            rootFilterGroup.items.push(nextItem);
           }
         } else {
           // Remove existing filter for this column
@@ -1130,6 +1214,18 @@
           if (Array.isArray(filterState.value)) return `= ${filterState.value.join(" | ")}`;
           return `= ${filterState.value}`;
         }
+        if (filterState.operator === "in_other_column") {
+          const target = String(filterState.value || "");
+          return filterState.use_visible_rows_only
+            ? `in col(${target}) using visible rows`
+            : `in col(${target})`;
+        }
+        if (filterState.operator === "partially_in_other_column") {
+          const target = String(filterState.value || "");
+          return filterState.use_visible_rows_only
+            ? `partially in col(${target}) using visible rows`
+            : `partially in col(${target})`;
+        }
         if (filterState.operator === "lt") {
           return `< ${filterState.value}`;
         }
@@ -1160,6 +1256,20 @@
             ? `[${filterState.value.map((item) => yamlQuote(item)).join(", ")}]`
             : yamlQuote(filterState.value);
           return `{ op: contains, value: ${v} }`;
+        }
+        if (filterState.operator === "in_other_column") {
+          const target = yamlQuote(String(filterState.value || ""));
+          if (filterState.use_visible_rows_only) {
+            return `{ op: in_other_column, value: ${target}, use_visible_rows_only: true }`;
+          }
+          return `{ op: in_other_column, value: ${target} }`;
+        }
+        if (filterState.operator === "partially_in_other_column") {
+          const target = yamlQuote(String(filterState.value || ""));
+          if (filterState.use_visible_rows_only) {
+            return `{ op: partially_in_other_column, value: ${target}, use_visible_rows_only: true }`;
+          }
+          return `{ op: partially_in_other_column, value: ${target} }`;
         }
         if (filterState.operator === "not_contains" || filterState.operator === "is_not_one_of" || filterState.operator === "lt" || filterState.operator === "gt") {
           const v = Array.isArray(filterState.value)
@@ -1681,13 +1791,20 @@
         if (parsedMapping) {
           const operator = parsedMapping.op || parsedMapping.operator || "contains";
           const value = Object.prototype.hasOwnProperty.call(parsedMapping, "value") ? parsedMapping.value : "";
-          const normalized = normalizeFilterDefinition(operator, value);
+          const normalized = normalizeFilterDefinition(operator, value, {
+            sourceColumn: column,
+            availableColumns: currentColumns,
+            useVisibleRowsOnly: parsedMapping.use_visible_rows_only,
+          });
           if (!normalized || normalized.invalid) {
             return null;
           }
           const item = { column, operator: normalized.operator };
-          if (normalized.operator !== "missing") {
+          if (operatorRequiresValue(normalized.operator)) {
             item.value = normalized.value;
+          }
+          if (normalized.operator === "in_other_column") {
+            item.use_visible_rows_only = Boolean(normalized.use_visible_rows_only);
           }
           return item;
         }
@@ -1700,7 +1817,7 @@
         }
 
         const item = { column, operator: normalized.operator };
-        if (normalized.operator !== "missing") {
+        if (operatorRequiresValue(normalized.operator)) {
           item.value = normalized.value;
         }
         return item;
@@ -2459,6 +2576,7 @@
               job_id: activeDatasetJobId,
               ...serializeFilterGroupForApi(),
               ordered_paths: currentRows.map((row) => String(row.__s3_path || "")).filter(Boolean),
+              visible_row_indexes: [...currentMatchingIndexes],
             };
             const response = await fetch("/api/filter", {
               method: "POST",
@@ -2717,7 +2835,7 @@
 
       columnSearchInput.addEventListener("input", buildColumnManager);
       filterColumnSelect.addEventListener("change", updateFilterValueOptions);
-      filterOperatorSelect.addEventListener("change", () => updateFilterValueInputState(filterValueInput, filterOperatorSelect.value, true));
+      filterOperatorSelect.addEventListener("change", updateFilterValueOptions);
       applyFilterButton.addEventListener("click", applyFilterFromComposer);
       cancelAddFilterButton.addEventListener("click", closeFilterComposer);
 

@@ -446,6 +446,122 @@ def test_api_filter_supports_nested_filter_groups() -> None:
             app_module.JOBS.pop(job_id, None)
 
 
+def test_api_filter_in_other_column_can_use_visible_rows_only() -> None:
+    job_id = "job-filter-in-other-column"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "status": "done",
+            "rows": [
+                {"experiment_id": "run-1", "__s3_path": "runs/exp-1", "tag": "baseline", "peer": "baseline"},
+                {"experiment_id": "run-2", "__s3_path": "runs/exp-2", "tag": "aug", "peer": "x"},
+                {"experiment_id": "run-3", "__s3_path": "runs/exp-3", "tag": "x", "peer": "x"},
+            ],
+        }
+
+    try:
+        client = app_module.app.test_client()
+        response = client.post(
+            "/api/filter",
+            json={
+                "job_id": job_id,
+                "filter_group": {
+                    "logic": "and",
+                    "items": [
+                        {
+                            "column": "tag",
+                            "operator": "in_other_column",
+                            "value": "peer",
+                            "use_visible_rows_only": True,
+                        }
+                    ],
+                },
+                "visible_row_indexes": [1],
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.get_json() == {"matching_indexes": [2]}
+    finally:
+        with app_module.JOBS_LOCK:
+            app_module.JOBS.pop(job_id, None)
+
+
+def test_api_filter_in_other_column_matches_substrings() -> None:
+    job_id = "job-filter-in-other-column-substring"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "status": "done",
+            "rows": [
+                {"experiment_id": "run-1", "__s3_path": "runs/exp-1", "tag": "base", "peer": "baseline"},
+                {"experiment_id": "run-2", "__s3_path": "runs/exp-2", "tag": "line", "peer": "baseline"},
+                {"experiment_id": "run-3", "__s3_path": "runs/exp-3", "tag": "zzz", "peer": "baseline"},
+            ],
+        }
+
+    try:
+        client = app_module.app.test_client()
+        response = client.post(
+            "/api/filter",
+            json={
+                "job_id": job_id,
+                "filter_group": {
+                    "logic": "and",
+                    "items": [
+                        {
+                            "column": "tag",
+                            "operator": "partially_in_other_column",
+                            "value": "peer",
+                        }
+                    ],
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.get_json() == {"matching_indexes": [0, 1]}
+    finally:
+        with app_module.JOBS_LOCK:
+            app_module.JOBS.pop(job_id, None)
+
+
+def test_api_filter_in_other_column_does_not_match_substrings() -> None:
+    job_id = "job-filter-in-other-column-exact"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "status": "done",
+            "rows": [
+                {"experiment_id": "run-1", "__s3_path": "runs/exp-1", "tag": "base", "peer": "baseline"},
+                {"experiment_id": "run-2", "__s3_path": "runs/exp-2", "tag": "line", "peer": "baseline"},
+                {"experiment_id": "run-3", "__s3_path": "runs/exp-3", "tag": "zzz", "peer": "baseline"},
+            ],
+        }
+
+    try:
+        client = app_module.app.test_client()
+        response = client.post(
+            "/api/filter",
+            json={
+                "job_id": job_id,
+                "filter_group": {
+                    "logic": "and",
+                    "items": [
+                        {
+                            "column": "tag",
+                            "operator": "in_other_column",
+                            "value": "peer",
+                        }
+                    ],
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.get_json() == {"matching_indexes": []}
+    finally:
+        with app_module.JOBS_LOCK:
+            app_module.JOBS.pop(job_id, None)
+
+
 def test_extract_git_hash_value_marks_dirty_diff(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_read_json(_s3_client: Any, bucket: str, key: str) -> Any:
         _ = (bucket, key)

@@ -82,6 +82,8 @@ def test_normalize_filter_logic_rejects_unknown_values() -> None:
         ({"column": "tag", "operator": "unknown", "value": "baseline"}, "Unsupported filter operator"),
         ({"column": "score", "operator": "lt", "value": "not-a-number"}, "Numeric filter value is required"),
         ({"column": "tag", "operator": "contains", "value": ""}, "Filter value is required"),
+        ({"column": "tag", "operator": "in_other_column", "value": ""}, "Target column is required for in_other_column filter"),
+        ({"column": "tag", "operator": "partially_in_other_column", "value": ""}, "Target column is required for partially_in_other_column filter"),
         ({"operator": "contains", "value": "baseline"}, "Filter column is required"),
     ],
 )
@@ -109,6 +111,61 @@ def test_filter_row_indexes_not_contains_with_list_value() -> None:
     # Should exclude rows whose tag contains *any* of the supplied values.
     indexes = filter_row_indexes(ROWS, [{"column": "tag", "operator": "not_contains", "value": ["aug", "large"]}])
     assert indexes == [0]
+
+
+def test_filter_row_indexes_in_other_column_uses_target_column_values() -> None:
+    rows = [
+        {"tag": "baseline", "peer": "baseline"},
+        {"tag": "aug", "peer": "x"},
+        {"tag": "x", "peer": "x"},
+    ]
+
+    indexes = filter_row_indexes(rows, [{"column": "tag", "operator": "in_other_column", "value": "peer"}])
+    assert indexes == [0, 2]
+
+
+def test_filter_row_indexes_in_other_column_can_use_visible_rows_only() -> None:
+    rows = [
+        {"tag": "baseline", "peer": "baseline"},
+        {"tag": "aug", "peer": "x"},
+        {"tag": "x", "peer": "x"},
+    ]
+
+    indexes = filter_row_indexes(
+        rows,
+        [
+            {
+                "column": "tag",
+                "operator": "in_other_column",
+                "value": "peer",
+                "use_visible_rows_only": True,
+            }
+        ],
+        visible_row_indexes=[1],
+    )
+    assert indexes == [2]
+
+
+def test_filter_row_indexes_in_other_column_matches_substrings() -> None:
+    rows = [
+        {"tag": "base", "peer": "baseline"},
+        {"tag": "line", "peer": "baseline"},
+        {"tag": "zzz", "peer": "baseline"},
+    ]
+
+    indexes = filter_row_indexes(rows, [{"column": "tag", "operator": "partially_in_other_column", "value": "peer"}])
+    assert indexes == [0, 1]
+
+
+def test_filter_row_indexes_in_other_column_does_not_match_substrings() -> None:
+    rows = [
+        {"tag": "base", "peer": "baseline"},
+        {"tag": "line", "peer": "baseline"},
+        {"tag": "zzz", "peer": "baseline"},
+    ]
+
+    indexes = filter_row_indexes(rows, [{"column": "tag", "operator": "in_other_column", "value": "peer"}])
+    assert indexes == []
 
 
 # ---------------------------------------------------------------------------
