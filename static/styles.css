@@ -215,6 +215,12 @@ progress {
   flex-wrap: nowrap;
 }
 
+.cache-info {
+  font-size: 0.8em;
+  color: #888;
+  margin-left: auto;
+}
+
 .inline-toggle {
   display: flex;
   align-items: center;

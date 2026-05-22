@@ -1,8 +1,9 @@
 import os
+import hashlib
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from configparser import ConfigParser
 from dataclasses import dataclass
 from threading import Lock, Thread, local
@@ -23,6 +24,50 @@ JOBS: dict[str, dict[str, Any]] = {}
 JOBS_LOCK = Lock()
 _resolve_lock = Lock()
 _thread_local = local()
+
+_CACHE_DIR = os.path.expanduser("~/.cache/ceph3_data_manager")
+
+
+def _cache_path(bucket: str, prefixes: list[str]) -> str:
+    payload = json.dumps({"bucket": bucket, "prefixes": sorted(prefixes)}, sort_keys=True)
+    digest = hashlib.sha256(payload.encode()).hexdigest()[:24]
+    return os.path.join(_CACHE_DIR, f"{digest}.json")
+
+
+def _read_cache(bucket: str, prefixes: list[str]) -> tuple[list, list, str] | None:
+    try:
+        path = _cache_path(bucket, prefixes)
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            data = json.load(f)
+        rows = data.get("rows")
+        columns = data.get("columns")
+        cached_at = str(data.get("cached_at", ""))
+        if not isinstance(rows, list) or not isinstance(columns, list):
+            return None
+        return rows, columns, cached_at
+    except Exception:
+        return None
+
+
+def _write_cache(bucket: str, prefixes: list[str], rows: list, columns: list) -> None:
+    try:
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        path = _cache_path(bucket, prefixes)
+        payload = {
+            "bucket": bucket,
+            "prefixes": sorted(prefixes),
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+            "rows": rows,
+            "columns": columns,
+        }
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
 
 
 @dataclass
@@ -291,34 +336,46 @@ def merge_experiment_config(
     bucket: str,
     files: ExperimentConfigFiles,
 ) -> dict[str, Any]:
-    config_obj = OmegaConf.create({})
-    hydra_obj = OmegaConf.create({})
-    overrides_obj = OmegaConf.create({})
+    fetched: dict[str, Any] = {}
 
-    if files.config_key:
-        config_data = read_yaml_from_s3(s3_client, bucket=bucket, key=files.config_key) or {}
-        config_obj = OmegaConf.create(config_data)
+    def _fetch(name: str, key: str) -> None:
+        fetched[name] = read_yaml_from_s3(s3_client, bucket=bucket, key=key)
 
-    if files.hydra_key:
-        hydra_data = read_yaml_from_s3(s3_client, bucket=bucket, key=files.hydra_key) or {}
-        if isinstance(hydra_data, dict) and "hydra" in hydra_data:
-            hydra_obj = OmegaConf.create(hydra_data)
-        else:
-            hydra_obj = OmegaConf.create({"hydra": hydra_data})
+    fetch_threads = [
+        Thread(target=_fetch, args=(name, key), daemon=True)
+        for name, key in (
+            ("config", files.config_key),
+            ("hydra", files.hydra_key),
+            ("overrides", files.overrides_key),
+        )
+        if key is not None
+    ]
+    for t in fetch_threads:
+        t.start()
+    for t in fetch_threads:
+        t.join()
 
-    choice_keys = set()
+    config_obj = OmegaConf.create(fetched.get("config") or {})
+
+    hydra_raw = fetched.get("hydra") or {}
+    if isinstance(hydra_raw, dict) and "hydra" in hydra_raw:
+        hydra_obj = OmegaConf.create(hydra_raw)
+    else:
+        hydra_obj = OmegaConf.create({"hydra": hydra_raw})
+
+    choice_keys: set[str] = set()
     choices = OmegaConf.select(hydra_obj, "hydra.runtime.choices")
     if choices is not None and hasattr(choices, "keys"):
         choice_keys = {str(key) for key in choices.keys()}
 
-    if files.overrides_key:
-        overrides_data = read_yaml_from_s3(s3_client, bucket=bucket, key=files.overrides_key) or []
-        if isinstance(overrides_data, list):
-            normalized = [normalize_override(str(item)) for item in overrides_data if str(item).strip()]
-            if choice_keys:
-                normalized = [item for item in normalized if not is_hydra_choice_override(item, choice_keys)]
-            if normalized:
-                overrides_obj = OmegaConf.from_dotlist(normalized)
+    overrides_obj = OmegaConf.create({})
+    overrides_raw = fetched.get("overrides")
+    if isinstance(overrides_raw, list):
+        normalized = [normalize_override(str(item)) for item in overrides_raw if str(item).strip()]
+        if choice_keys:
+            normalized = [item for item in normalized if not is_hydra_choice_override(item, choice_keys)]
+        if normalized:
+            overrides_obj = OmegaConf.from_dotlist(normalized)
 
     merged = OmegaConf.merge(config_obj, hydra_obj, overrides_obj)
     # run_name can be used by interpolations in config/hydra fields.
@@ -430,31 +487,54 @@ def load_experiment_rows(
         def process_one(experiment_id: str) -> tuple[str, dict[str, str], set[str]]:
             s3 = _get_thread_s3_client(region, endpoint_url)
             files = experiments[experiment_id]
+
+            flat_result: list[dict[str, Any]] = []
+            flat_error: list[Exception] = []
+            git_result: list[str] = [""]
+            analysis_result: list[str] = [""]
+
+            def _fetch_config() -> None:
+                try:
+                    flat_result.append(merge_experiment_config(s3, bucket=bucket, files=files))
+                except Exception as exc:
+                    flat_error.append(exc)
+
+            def _fetch_git() -> None:
+                git_result[0] = extract_git_hash_value(s3, bucket=bucket, experiment_id=experiment_id)
+
+            def _fetch_analysis() -> None:
+                analysis_result[0] = extract_last_analysis_step(s3, bucket=bucket, experiment_id=experiment_id)
+
+            sub_threads = [Thread(target=f, daemon=True) for f in (_fetch_config, _fetch_git, _fetch_analysis)]
+            for t in sub_threads:
+                t.start()
+            for t in sub_threads:
+                t.join()
+
             row: dict[str, str] = {
                 "run_name": display_experiment_id(experiment_id),
                 "__s3_path": experiment_id,
-                "git_hash": "",
-                "last_analysis_step": "",
+                "git_hash": git_result[0],
+                "last_analysis_step": analysis_result[0],
             }
             local_columns: set[str] = set()
-            try:
-                flat = merge_experiment_config(s3, bucket=bucket, files=files)
-                for key, value in flat.items():
+
+            if flat_error:
+                row["__error__"] = f"Could not merge config: {flat_error[0]}"
+                local_columns.add("__error__")
+            elif flat_result:
+                for key, value in flat_result[0].items():
                     if key in {"run_name", "experiment_id"}:
                         continue
                     row[key] = str(value)
                     local_columns.add(key)
-            except Exception as file_error:
-                row["__error__"] = f"Could not merge config: {file_error}"
-                local_columns.add("__error__")
+
             row["run_name"] = display_experiment_id(experiment_id)
-            row["git_hash"] = extract_git_hash_value(s3, bucket=bucket, experiment_id=experiment_id)
-            row["last_analysis_step"] = extract_last_analysis_step(s3, bucket=bucket, experiment_id=experiment_id)
             return experiment_id, row, local_columns
 
         results: dict[str, dict[str, str]] = {}
         processed = 0
-        max_workers = min(16, total or 1)
+        max_workers = min(64, total or 1)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(process_one, eid): eid for eid in sorted_ids}
             for future in as_completed(futures):
@@ -521,7 +601,8 @@ def run_load_job(job_id: str, bucket: str, prefixes: list[str], region: str | No
         set_job_state(job_id, status="error", error=error)
         return
 
-    set_job_state(job_id, status="done", rows=rows, columns=columns, processed=len(rows), total=len(rows))
+    _write_cache(bucket, prefixes, rows, columns)
+    set_job_state(job_id, status="done", rows=rows, columns=columns, processed=len(rows), total=len(rows), cached_at=None)
 
 
 @app.route("/", methods=["GET"])
@@ -546,6 +627,7 @@ def api_load() -> Any:
     bucket = str(payload.get("bucket", "")).strip()
     region = str(payload.get("region", "")).strip() or None
     endpoint_url = str(payload.get("endpoint_url", "")).strip() or None
+    force_refresh = bool(payload.get("refresh", False))
 
     # Accept either a list of prefixes or a single prefix string.
     raw_prefixes = payload.get("prefixes")
@@ -559,6 +641,25 @@ def api_load() -> Any:
         return jsonify({"error": "Bucket is required"}), 400
 
     job_id = uuid4().hex
+
+    if not force_refresh:
+        cached = _read_cache(bucket, prefixes)
+        if cached:
+            rows, columns, cached_at = cached
+            with JOBS_LOCK:
+                JOBS[job_id] = {
+                    "status": "done",
+                    "phase": "done",
+                    "processed": len(rows),
+                    "total": len(rows),
+                    "error": None,
+                    "rows": rows,
+                    "columns": columns,
+                    "cancel_requested": False,
+                    "cached_at": cached_at,
+                }
+            return jsonify({"job_id": job_id})
+
     with JOBS_LOCK:
         JOBS[job_id] = {
             "status": "running",
@@ -569,6 +670,7 @@ def api_load() -> Any:
             "rows": [],
             "columns": [],
             "cancel_requested": False,
+            "cached_at": None,
         }
 
     worker = Thread(target=run_load_job, args=(job_id, bucket, prefixes, region, endpoint_url), daemon=True)

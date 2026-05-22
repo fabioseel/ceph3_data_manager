@@ -32,6 +32,10 @@
             <input type="checkbox" id="autoHideConstantInSettings" checked />
             Auto-hide constant columns
           </label>
+          <label class="inline-toggle">
+            <input type="checkbox" id="forceRefreshCheckbox" />
+            Force refresh from S3
+          </label>
           <button type="submit">Load Experiments</button>
         </form>
         <section class="presets">
@@ -56,6 +60,7 @@
         <button type="button" id="openColumnManager" class="secondary">Manage Columns</button>
         <button type="button" id="openFilterManager" class="secondary">Manage Filters</button>
         <button type="button" id="openTextGenerator" class="secondary">Generate Text</button>
+        <span id="cacheInfo" class="cache-info hidden"></span>
       </section>
 
       <section id="filtersPanel" class="panel hidden">
@@ -224,6 +229,8 @@
       const openFilterManagerButton = document.getElementById("openFilterManager");
       const openTextGeneratorButton = document.getElementById("openTextGenerator");
       const autoHideConstantCheckbox = document.getElementById("autoHideConstantInSettings");
+      const forceRefreshCheckbox = document.getElementById("forceRefreshCheckbox");
+      const cacheInfoEl = document.getElementById("cacheInfo");
 
       const filtersPanel = document.getElementById("filtersPanel");
       const toggleFiltersEnabledButton = document.getElementById("toggleFiltersEnabled");
@@ -2660,6 +2667,29 @@
         renderTable();
       }
 
+      function formatCachedAt(iso) {
+        try {
+          const diffMs = Date.now() - new Date(iso).getTime();
+          const mins = Math.floor(diffMs / 60000);
+          if (mins < 1) return "just now";
+          if (mins < 60) return `${mins}m ago`;
+          const hrs = Math.floor(mins / 60);
+          if (hrs < 24) return `${hrs}h ago`;
+          return `${Math.floor(hrs / 24)}d ago`;
+        } catch (_) {
+          return iso;
+        }
+      }
+
+      function setCacheInfo(cachedAt) {
+        if (cachedAt) {
+          cacheInfoEl.textContent = `Cached ${formatCachedAt(cachedAt)}`;
+          cacheInfoEl.classList.remove("hidden");
+        } else {
+          cacheInfoEl.classList.add("hidden");
+        }
+      }
+
       async function pollStatus(jobId) {
         while (true) {
           const response = await fetch(`/api/status/${jobId}`);
@@ -2675,6 +2705,7 @@
             setLoading(false);
             currentJobId = null;
             initializeData(status.columns || [], status.rows || [], jobId);
+            setCacheInfo(status.cached_at || null);
             setError("");
             return;
           }
@@ -2713,6 +2744,7 @@
           prefixes: rawPrefixes,
           region: String(formData.get("region") || "").trim(),
           endpoint_url: String(formData.get("endpoint_url") || "").trim(),
+          refresh: forceRefreshCheckbox.checked,
         };
 
         try {
