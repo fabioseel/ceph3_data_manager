@@ -794,6 +794,35 @@ tbody tr:hover {
   opacity: 0.45;
 }
 
+.filter-item.is-disabled {
+  opacity: 0.4;
+}
+
+.filter-drop-divider {
+  height: 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  transition: height 0.1s, background 0.1s;
+}
+
+.filter-drop-divider.is-active {
+  height: 10px;
+  background: rgba(15, 118, 110, 0.12);
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
+.filter-group.is-disabled {
+  opacity: 0.5;
+}
+
+.filter-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
 .filter-item-text {
   flex: 1;
   color: var(--ink);
@@ -801,10 +830,44 @@ tbody tr:hover {
   font-size: 0.85rem;
 }
 
-.filter-item button {
+.filter-item-actions button {
   padding: 4px 8px;
   font-size: 0.8rem;
-  margin-left: 8px;
+}
+
+.filter-disable-btn {
+  min-width: 24px;
+  font-size: 0.75rem;
+}
+
+.filter-disable-btn.is-inactive {
+  color: #aaa;
+  background: #efefef;
+}
+
+.filter-negate-btn {
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.filter-negate-btn.is-active {
+  color: #c0392b;
+  background: rgba(192, 57, 43, 0.1);
+  border-color: rgba(192, 57, 43, 0.3);
+}
+
+.filter-item.is-negated {
+  border-left: 2px solid rgba(192, 57, 43, 0.5);
+}
+
+.group-disable-button {
+  font-size: 0.8rem;
+  padding: 4px 8px;
+}
+
+.group-disable-button.is-inactive {
+  color: #aaa;
+  background: #efefef;
 }
 
 .empty-mini {

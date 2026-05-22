@@ -124,26 +124,43 @@ def test_filter_row_indexes_in_other_column_uses_target_column_values() -> None:
     assert indexes == [0, 2]
 
 
-def test_filter_row_indexes_in_other_column_can_use_visible_rows_only() -> None:
+def test_filter_row_indexes_in_other_column_use_preceding_context() -> None:
+    """use_visible_rows_only=True uses rows passing preceding AND filters as context."""
+    rows = [
+        {"name": "A", "ref": "B"},
+        {"name": "B", "ref": "C"},
+        {"name": "C", "ref": "A"},
+        {"name": "D", "ref": "D"},
+    ]
+    # Filter 1: name is_one_of A, B → rows 0, 1
+    # Filter 2: name in_other_column ref, use_visible_rows_only=True
+    #   context = rows passing filter 1 = [row0(ref=B), row1(ref=C)] → lookup = {B, C}
+    #   applied to current_result [0, 1]: A∈{B,C}? No  B∈{B,C}? Yes
+    indexes = filter_row_indexes(
+        rows,
+        [
+            {"column": "name", "operator": "is_one_of", "value": ["A", "B"]},
+            {"column": "name", "operator": "in_other_column", "value": "ref", "use_visible_rows_only": True},
+        ],
+    )
+    assert indexes == [1]
+
+
+def test_filter_row_indexes_in_other_column_or_group_uses_visible_row_indexes() -> None:
+    """OR groups still use explicitly-passed visible_row_indexes for context."""
     rows = [
         {"tag": "baseline", "peer": "baseline"},
         {"tag": "aug", "peer": "x"},
         {"tag": "x", "peer": "x"},
     ]
-
-    indexes = filter_row_indexes(
-        rows,
-        [
-            {
-                "column": "tag",
-                "operator": "in_other_column",
-                "value": "peer",
-                "use_visible_rows_only": True,
-            }
-        ],
-        visible_row_indexes=[1],
+    group = FilterGroup(
+        logic="or",
+        items=tuple(compile_filters([
+            {"column": "tag", "operator": "in_other_column", "value": "peer", "use_visible_rows_only": True},
+        ])),
     )
-    assert indexes == [2]
+    indexes = filter_row_indexes_by_group(rows, group, visible_row_indexes=[1])
+    assert indexes == [2]  # lookup from row1.peer={x} → tag x matches
 
 
 def test_filter_row_indexes_in_other_column_matches_substrings() -> None:
@@ -396,3 +413,37 @@ def test_filter_group_negate_on_nested_group() -> None:
     outer = FilterGroup(logic="and", items=(not_baseline, b))
     # NOT(baseline) AND epoch>10 = {1} AND {1,2} = row 1
     assert filter_row_indexes_by_group(ROWS, outer) == [1]
+
+
+def test_compiled_filter_negate_inverts_match() -> None:
+    """A negated CompiledFilter should match the complement of its condition."""
+    negated = compile_filters([{"column": "tag", "operator": "contains", "value": "baseline", "negate": True}])[0]
+    assert negated.negate is True
+    # Baseline rows are 0, 2; negated → row 1
+    group = FilterGroup(logic="and", items=(negated,))
+    assert filter_row_indexes_by_group(ROWS, group) == [1]
+
+
+def test_compiled_filter_negate_via_filter_row_indexes() -> None:
+    """Negated individual filter works through the flat filter_row_indexes API."""
+    indexes = filter_row_indexes(ROWS, [{"column": "tag", "operator": "contains", "value": "baseline", "negate": True}])
+    assert indexes == [1]
+
+
+def test_compiled_filter_negate_in_and_group_is_sequential() -> None:
+    """Negated filter participates in sequential AND evaluation correctly."""
+    # epoch > 10 matches rows 1, 2; NOT tag contains baseline matches row 1
+    # AND sequential: first filter gives [1, 2], second (negated baseline) on [1,2] gives [1]
+    indexes = filter_row_indexes(ROWS, [
+        {"column": "epoch", "operator": "gt", "value": "10"},
+        {"column": "tag", "operator": "contains", "value": "baseline", "negate": True},
+    ])
+    assert indexes == [1]
+
+
+def test_compiled_filter_negate_missing_operator() -> None:
+    """A negated 'missing' filter matches rows where the column is present."""
+    rows = [{"x": ""}, {"x": "hello"}, {"x": None}]
+    indexes = filter_row_indexes(rows, [{"column": "x", "operator": "missing", "negate": True}])
+    # row 1 has a value; rows 0 and 2 are missing
+    assert indexes == [1]

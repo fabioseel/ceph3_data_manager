@@ -446,15 +446,17 @@ def test_api_filter_supports_nested_filter_groups() -> None:
             app_module.JOBS.pop(job_id, None)
 
 
-def test_api_filter_in_other_column_can_use_visible_rows_only() -> None:
+def test_api_filter_in_other_column_use_preceding_context() -> None:
+    """use_visible_rows_only uses preceding AND filter results as context (not visible_row_indexes)."""
     job_id = "job-filter-in-other-column"
     with app_module.JOBS_LOCK:
         app_module.JOBS[job_id] = {
             "status": "done",
             "rows": [
-                {"experiment_id": "run-1", "__s3_path": "runs/exp-1", "tag": "baseline", "peer": "baseline"},
-                {"experiment_id": "run-2", "__s3_path": "runs/exp-2", "tag": "aug", "peer": "x"},
-                {"experiment_id": "run-3", "__s3_path": "runs/exp-3", "tag": "x", "peer": "x"},
+                {"__s3_path": "runs/exp-1", "name": "A", "ref": "B"},
+                {"__s3_path": "runs/exp-2", "name": "B", "ref": "C"},
+                {"__s3_path": "runs/exp-3", "name": "C", "ref": "A"},
+                {"__s3_path": "runs/exp-4", "name": "D", "ref": "D"},
             ],
         }
 
@@ -467,20 +469,18 @@ def test_api_filter_in_other_column_can_use_visible_rows_only() -> None:
                 "filter_group": {
                     "logic": "and",
                     "items": [
-                        {
-                            "column": "tag",
-                            "operator": "in_other_column",
-                            "value": "peer",
-                            "use_visible_rows_only": True,
-                        }
+                        {"column": "name", "operator": "is_one_of", "value": ["A", "B"]},
+                        {"column": "name", "operator": "in_other_column", "value": "ref", "use_visible_rows_only": True},
                     ],
                 },
-                "visible_row_indexes": [1],
+                "visible_row_indexes": [3],  # ignored for AND groups
             },
         )
 
         assert response.status_code == 200
-        assert response.get_json() == {"matching_indexes": [2]}
+        # context = rows passing first filter (A, B); lookup from their ref = {B, C}
+        # applied to current_result [A, B]: A∈{B,C}? No  B∈{B,C}? Yes → [1]
+        assert response.get_json() == {"matching_indexes": [1]}
     finally:
         with app_module.JOBS_LOCK:
             app_module.JOBS.pop(job_id, None)

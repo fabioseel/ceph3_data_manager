@@ -51,6 +51,8 @@ class CompiledFilter:
     text_values: tuple[str, ...] = ()
     numeric_value: float | None = None
     use_visible_rows_only: bool = False
+    disabled: bool = False
+    negate: bool = False
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,7 @@ class FilterGroup:
     logic: str
     items: tuple[Union[CompiledFilter, FilterGroup], ...] = ()  # Recursive: filters or subgroups
     negate: bool = False  # When True, invert the result of this group
+    disabled: bool = False
 
 
 def normalize_operator(operator: Any) -> str:
@@ -113,10 +116,12 @@ def compile_filter_spec(spec: dict[str, Any]) -> CompiledFilter:
     if not column:
         raise ValueError("Filter column is required")
 
+    disabled = _coerce_bool(spec.get("disabled", False))
+    negate = _coerce_bool(spec.get("negate", False))
     operator = normalize_operator(spec.get("operator"))
 
     if operator == "missing":
-        return CompiledFilter(column=column, operator=operator)
+        return CompiledFilter(column=column, operator=operator, disabled=disabled, negate=negate)
 
     if operator in ("in_other_column", "partially_in_other_column"):
         other_column = str(spec.get("other_column") or spec.get("value") or "").strip()
@@ -127,18 +132,20 @@ def compile_filter_spec(spec: dict[str, Any]) -> CompiledFilter:
             operator=operator,
             text_values=(other_column,),
             use_visible_rows_only=_coerce_bool(spec.get("use_visible_rows_only", False)),
+            disabled=disabled,
+            negate=negate,
         )
 
     if operator in ("contains", "not_contains", "is_one_of", "is_not_one_of"):
         text_values = _normalize_text_values(spec.get("value"))
         if not text_values:
             raise ValueError(f"Filter value is required for column: {column}")
-        return CompiledFilter(column=column, operator=operator, text_values=text_values)
+        return CompiledFilter(column=column, operator=operator, text_values=text_values, disabled=disabled, negate=negate)
 
     numeric_value = _coerce_number(spec.get("value"))
     if numeric_value is None:
         raise ValueError(f"Numeric filter value is required for column: {column}")
-    return CompiledFilter(column=column, operator=operator, numeric_value=numeric_value)
+    return CompiledFilter(column=column, operator=operator, numeric_value=numeric_value, disabled=disabled, negate=negate)
 
 
 def compile_filters(filter_specs: Sequence[dict[str, Any]]) -> list[CompiledFilter]:
@@ -155,7 +162,9 @@ def _normalized_cell_value(value: Any) -> str:
 
 def _collect_compiled_filters(item: Union[CompiledFilter, FilterGroup]) -> list[CompiledFilter]:
     if isinstance(item, CompiledFilter):
-        return [item]
+        return [] if item.disabled else [item]
+    if item.disabled:
+        return []
     filters: list[CompiledFilter] = []
     for sub_item in item.items:
         filters.extend(_collect_compiled_filters(sub_item))
@@ -250,17 +259,25 @@ def row_matches_filter_or_group(
 ) -> bool:
     """Recursively evaluate a filter or filter group against a row."""
     if isinstance(item, CompiledFilter):
-        return row_matches_filter(row, item, in_other_column_lookups=in_other_column_lookups)
+        if item.disabled:
+            return True
+        result = row_matches_filter(row, item, in_other_column_lookups=in_other_column_lookups)
+        return not result if item.negate else result
     # It's a FilterGroup
-    if item.logic == "or":
+    if item.disabled:
+        return True
+    active_items = [i for i in item.items if not i.disabled]
+    if not active_items:
+        result = True
+    elif item.logic == "or":
         result = any(
             row_matches_filter_or_group(row, sub_item, in_other_column_lookups=in_other_column_lookups)
-            for sub_item in item.items
+            for sub_item in active_items
         )
     else:
         result = all(
             row_matches_filter_or_group(row, sub_item, in_other_column_lookups=in_other_column_lookups)
-            for sub_item in item.items
+            for sub_item in active_items
         )
     return not result if item.negate else result
 
@@ -277,12 +294,46 @@ def filter_row_indexes(
     if not compiled:
         return list(range(len(rows)))
     group = FilterGroup(logic=logic, items=tuple(compiled))
-    lookup_sets = _build_in_other_column_lookup_sets(rows, group, visible_row_indexes)
-    return [
-        i
-        for i, row in enumerate(rows)
-        if row_matches_filter_or_group(row, group, in_other_column_lookups=lookup_sets)
-    ]
+    return filter_row_indexes_by_group(rows, group, visible_row_indexes)
+
+
+def _filter_and_sequential(
+    rows: Sequence[dict[str, Any]],
+    group: FilterGroup,
+) -> list[int]:
+    """Apply AND filters one by one so use_visible_rows_only filters use preceding filter results as context."""
+    active_items = [item for item in group.items if not item.disabled]
+    if not active_items:
+        result_indexes = list(range(len(rows)))
+    else:
+        current_result = list(range(len(rows)))
+        for item in active_items:
+            if isinstance(item, FilterGroup):
+                sub_result_set = set(filter_row_indexes_by_group(rows, item, current_result))
+                current_result = [i for i in current_result if i in sub_result_set]
+            else:
+                if item.use_visible_rows_only and item.operator in ("in_other_column", "partially_in_other_column"):
+                    target_col = item.text_values[0]
+                    lookup_set = {
+                        v for v in (
+                            _normalized_cell_value(rows[i].get(target_col))
+                            for i in current_result
+                        )
+                        if v
+                    }
+                    item_lookups: dict[CompiledFilter, set[str]] = {item: lookup_set}
+                else:
+                    item_lookups = _build_in_other_column_lookup_sets(rows, item, None)
+                current_result = [
+                    i for i in current_result
+                    if row_matches_filter(rows[i], item, item_lookups) != item.negate
+                ]
+        result_indexes = current_result
+
+    if group.negate:
+        all_indexes = set(range(len(rows)))
+        return sorted(all_indexes - set(result_indexes))
+    return result_indexes
 
 
 def filter_row_indexes_by_group(
@@ -291,8 +342,10 @@ def filter_row_indexes_by_group(
     visible_row_indexes: Sequence[int] | None = None,
 ) -> list[int]:
     """Evaluate a hierarchical FilterGroup structure."""
-    if not filter_group.items:
+    if not filter_group.items or filter_group.disabled:
         return list(range(len(rows)))
+    if filter_group.logic == "and":
+        return _filter_and_sequential(rows, filter_group)
     lookup_sets = _build_in_other_column_lookup_sets(rows, filter_group, visible_row_indexes)
     return [
         i

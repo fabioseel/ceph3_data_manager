@@ -211,9 +211,10 @@ def _deserialize_filter_group(data: Any) -> FilterGroup:
     """Recursively deserialize a filter group from dict representation."""
     if not isinstance(data, dict):
         raise ValueError("Filter group must be a dict")
-    
+
     logic = normalize_filter_logic(data.get("logic", "and"))
     negate = bool(data.get("negate", False))
+    disabled = bool(data.get("disabled", False))
     items_data = data.get("items", [])
     
     if not isinstance(items_data, list):
@@ -239,7 +240,7 @@ def _deserialize_filter_group(data: Any) -> FilterGroup:
             except ValueError as e:
                 raise ValueError(f"Invalid filter spec: {e}")
     
-    return FilterGroup(logic=logic, items=tuple(items), negate=negate)
+    return FilterGroup(logic=logic, items=tuple(items), negate=negate, disabled=disabled)
 
 
 def display_experiment_id(experiment_id: str) -> str:

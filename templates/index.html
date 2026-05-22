@@ -95,7 +95,7 @@
           </label>
           <label id="filterVisibleRowsOnlyLabel" class="inline-toggle hidden">
             <input type="checkbox" id="filterVisibleRowsOnly" />
-            Use only values from visible rows
+            Apply after preceding filters
           </label>
           <div class="visibility-actions">
             <button type="button" id="applyFilter" class="secondary">Add Filter</button>
@@ -300,6 +300,7 @@
       let replacementVariablesState = [];
       let sortState = { column: null, direction: null };
       let filterComposerState = { open: false, targetGroupPath: "root" };
+      let editingItemPath = null;
       let collapsedGroupPaths = new Set();
       let draggedFilterItemPath = null;
       const HIDDEN_COLUMNS_STORAGE_KEY = "ceph3_data_manager.hidden_columns";
@@ -721,6 +722,54 @@
         return true;
       }
 
+      function moveFilterItemToGroupAtIndex(itemPath, targetGroupPath, insertIndex) {
+        const source = findParentGroupAndIndexByItemPath(itemPath);
+        const targetGroup = findGroupByPath(targetGroupPath);
+        if (!source || !targetGroup) {
+          return false;
+        }
+
+        const item = source.group.items[source.index];
+        if (!item || item.logic !== undefined) {
+          return false;
+        }
+
+        source.group.items.splice(source.index, 1);
+
+        let adjustedIndex = insertIndex;
+        if (source.group === targetGroup && source.index < insertIndex) {
+          adjustedIndex = Math.max(0, insertIndex - 1);
+        }
+        const clampedIndex = Math.max(0, Math.min(adjustedIndex, targetGroup.items.length));
+        targetGroup.items.splice(clampedIndex, 0, item);
+        return true;
+      }
+
+      function createDropDivider(groupPath, insertIndex) {
+        const div = document.createElement("div");
+        div.className = "filter-drop-divider";
+        div.addEventListener("dragover", (e) => {
+          if (!draggedFilterItemPath) return;
+          e.preventDefault();
+          e.stopPropagation();
+          div.classList.add("is-active");
+        });
+        div.addEventListener("dragleave", () => div.classList.remove("is-active"));
+        div.addEventListener("drop", (e) => {
+          if (!draggedFilterItemPath) return;
+          e.preventDefault();
+          e.stopPropagation();
+          div.classList.remove("is-active");
+          const moved = moveFilterItemToGroupAtIndex(draggedFilterItemPath, groupPath, insertIndex);
+          draggedFilterItemPath = null;
+          if (moved) {
+            buildActiveFiltersPanel();
+            applyFilters();
+          }
+        });
+        return div;
+      }
+
       function toggleGroupCollapsed(groupPath) {
         if (collapsedGroupPaths.has(groupPath)) {
           collapsedGroupPaths.delete(groupPath);
@@ -836,21 +885,40 @@
         }
       }
 
+      function openFilterComposerForEdit(filterItem, itemPath) {
+        editingItemPath = itemPath;
+        filterComposerState.open = true;
+        filterComposerState.targetGroupPath = itemPath.split("::")[0];
+
+        populateFilterTargetGroupSelect(filterComposerState.targetGroupPath);
+        populateFilterColumnSelect(filterItem.column);
+        const selectedOperator = populateOperatorSelect(filterOperatorSelect, filterItem.column, filterItem.operator);
+        updateFilterValueOptions();
+        filterValueInput.value = formatFilterValueForInput(filterItem);
+        filterVisibleRowsOnly.checked = Boolean(filterItem.use_visible_rows_only);
+        updateVisibleRowsOnlyControl(selectedOperator);
+
+        applyFilterButton.textContent = "Update Filter";
+        filterComposer.classList.remove("hidden");
+        if (!filterValueInput.disabled) {
+          filterValueInput.focus();
+        }
+      }
+
       function closeFilterComposer() {
         filterComposerState.open = false;
         filterComposer.classList.add("hidden");
         filterValueInput.value = "";
         filterVisibleRowsOnly.checked = false;
         updateVisibleRowsOnlyControl("contains");
+        if (editingItemPath) {
+          editingItemPath = null;
+          applyFilterButton.textContent = "Add Filter";
+        }
       }
 
       function applyFilterFromComposer() {
         const targetPath = filterTargetGroupSelect.value || "root";
-        const targetGroup = findGroupByPath(targetPath);
-        if (!targetGroup) {
-          setError("Selected target group is no longer available.");
-          return;
-        }
 
         const column = String(filterColumnSelect.value || "").trim();
         if (!column || !currentColumns.includes(column)) {
@@ -883,8 +951,31 @@
           newFilter.use_visible_rows_only = Boolean(normalized.use_visible_rows_only);
         }
 
-        targetGroup.items.push(newFilter);
-        filterComposerState.targetGroupPath = targetPath;
+        if (editingItemPath) {
+          // Update mode: remove from current position, add to selected target group
+          const found = findParentGroupAndIndexByItemPath(editingItemPath);
+          if (found) {
+            newFilter.disabled = Boolean(found.group.items[found.index]?.disabled);
+            newFilter.negate = Boolean(found.group.items[found.index]?.negate);
+            found.group.items.splice(found.index, 1);
+          }
+          const targetGroup = findGroupByPath(targetPath);
+          if (!targetGroup) {
+            setError("Selected target group is no longer available.");
+            return;
+          }
+          targetGroup.items.push(newFilter);
+          editingItemPath = null;
+          applyFilterButton.textContent = "Add Filter";
+        } else {
+          const targetGroup = findGroupByPath(targetPath);
+          if (!targetGroup) {
+            setError("Selected target group is no longer available.");
+            return;
+          }
+          targetGroup.items.push(newFilter);
+          filterComposerState.targetGroupPath = targetPath;
+        }
         filterValueInput.value = "";
         buildActiveFiltersPanel();
         applyFilters();
@@ -900,6 +991,9 @@
         }
         if (group.negate) {
           container.classList.add("is-negated");
+        }
+        if (group.disabled) {
+          container.classList.add("is-disabled");
         }
         if (depth > 0) {
           container.style.marginLeft = `${depth * 20}px`;
@@ -944,10 +1038,21 @@
           refreshFilters();
         });
 
+        const disableGroupBtn = document.createElement("button");
+        disableGroupBtn.type = "button";
+        disableGroupBtn.className = "secondary group-disable-button" + (group.disabled ? " is-inactive" : "");
+        disableGroupBtn.textContent = group.disabled ? "Disabled" : "Active";
+        disableGroupBtn.title = group.disabled ? "Click to re-enable this group" : "Click to disable this group";
+        disableGroupBtn.addEventListener("click", () => {
+          group.disabled = !group.disabled;
+          refreshFilters();
+        });
+
         header.appendChild(collapseButton);
         header.appendChild(logicLabel);
         header.appendChild(logicSelect);
         header.appendChild(negateButton);
+        header.appendChild(disableGroupBtn);
 
         // Action buttons
         const actions = document.createElement("div");
@@ -1008,7 +1113,7 @@
           }
           event.preventDefault();
           itemsList.classList.remove("is-drop-target");
-          const moved = moveFilterItemToGroup(draggedFilterItemPath, groupPath);
+          const moved = moveFilterItemToGroupAtIndex(draggedFilterItemPath, groupPath, group.items.length);
           draggedFilterItemPath = null;
           if (moved) {
             buildActiveFiltersPanel();
@@ -1021,13 +1126,15 @@
           return container;
         }
 
+        itemsList.appendChild(createDropDivider(groupPath, 0));
+
         group.items.forEach((item, index) => {
           if (item.logic !== undefined) {
             // It's a nested group
             itemsList.appendChild(renderFilterGroup(item, depth + 1, `${groupPath}.${index}`));
           } else {
             // It's a filter
-            const filterEl = renderFilterItem(item, group);
+            const filterEl = renderFilterItem(item, group, getItemPath(groupPath, index));
             filterEl.draggable = true;
             filterEl.dataset.itemPath = getItemPath(groupPath, index);
             filterEl.addEventListener("dragstart", () => {
@@ -1040,6 +1147,7 @@
             });
             itemsList.appendChild(filterEl);
           }
+          itemsList.appendChild(createDropDivider(groupPath, index + 1));
         });
 
         if (group.items.length === 0 && depth > 0) {
@@ -1053,14 +1161,46 @@
         return container;
       }
 
-      function renderFilterItem(filterItem, parentGroup) {
+      function renderFilterItem(filterItem, parentGroup, itemPath) {
+        const isNegated = Boolean(filterItem.negate);
         const el = document.createElement("div");
-        el.className = "filter-item";
+        el.className = "filter-item" + (filterItem.disabled ? " is-disabled" : "") + (isNegated ? " is-negated" : "");
 
         const text = document.createElement("span");
         text.className = "filter-item-text";
-        const valueLabel = filterItem.operator === "missing" ? "is missing" : formatFilterLabel({ operator: filterItem.operator, value: filterItem.value });
-        text.textContent = `${filterItem.column} ${valueLabel}`;
+        const valueLabel = filterItem.operator === "missing" ? "is missing" : formatFilterLabel({ operator: filterItem.operator, value: filterItem.value, use_visible_rows_only: filterItem.use_visible_rows_only });
+        text.textContent = (isNegated ? "NOT " : "") + `${filterItem.column} ${valueLabel}`;
+
+        const actionsDiv = document.createElement("div");
+        actionsDiv.className = "filter-item-actions";
+
+        const negateBtn = document.createElement("button");
+        negateBtn.type = "button";
+        negateBtn.className = "secondary filter-negate-btn" + (isNegated ? " is-active" : "");
+        negateBtn.textContent = "NOT";
+        negateBtn.title = isNegated ? "Remove NOT (stop negating this filter)" : "Negate this filter (NOT)";
+        negateBtn.addEventListener("click", () => {
+          filterItem.negate = !filterItem.negate;
+          refreshFilters();
+        });
+
+        const editBtn = document.createElement("button");
+        editBtn.type = "button";
+        editBtn.className = "secondary";
+        editBtn.textContent = "Edit";
+        editBtn.addEventListener("click", () => {
+          if (itemPath) openFilterComposerForEdit(filterItem, itemPath);
+        });
+
+        const disableBtn = document.createElement("button");
+        disableBtn.type = "button";
+        disableBtn.className = "secondary filter-disable-btn" + (filterItem.disabled ? " is-inactive" : "");
+        disableBtn.textContent = filterItem.disabled ? "○" : "●";
+        disableBtn.title = filterItem.disabled ? "Enable this filter" : "Disable this filter";
+        disableBtn.addEventListener("click", () => {
+          filterItem.disabled = !filterItem.disabled;
+          refreshFilters();
+        });
 
         const removeBtn = document.createElement("button");
         removeBtn.type = "button";
@@ -1075,7 +1215,11 @@
         });
 
         el.appendChild(text);
-        el.appendChild(removeBtn);
+        actionsDiv.appendChild(negateBtn);
+        actionsDiv.appendChild(editBtn);
+        actionsDiv.appendChild(disableBtn);
+        actionsDiv.appendChild(removeBtn);
+        el.appendChild(actionsDiv);
         return el;
       }
 
@@ -1129,12 +1273,21 @@
               if (item.operator === "in_other_column" || item.operator === "partially_in_other_column") {
                 spec.use_visible_rows_only = Boolean(item.use_visible_rows_only);
               }
+              if (item.disabled) {
+                spec.disabled = true;
+              }
+              if (item.negate) {
+                spec.negate = true;
+              }
               return spec;
             }
           }),
         };
         if (group.negate) {
           out.negate = true;
+        }
+        if (group.disabled) {
+          out.disabled = true;
         }
         return out;
       }
@@ -1224,13 +1377,13 @@
         if (filterState.operator === "in_other_column") {
           const target = String(filterState.value || "");
           return filterState.use_visible_rows_only
-            ? `in col(${target}) using visible rows`
+            ? `in col(${target}) after preceding`
             : `in col(${target})`;
         }
         if (filterState.operator === "partially_in_other_column") {
           const target = String(filterState.value || "");
           return filterState.use_visible_rows_only
-            ? `partially in col(${target}) using visible rows`
+            ? `partially in col(${target}) after preceding`
             : `partially in col(${target})`;
         }
         if (filterState.operator === "lt") {
