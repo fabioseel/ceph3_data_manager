@@ -252,6 +252,29 @@ def test_dump_filter_settings_round_trips_correctly() -> None:
     assert filter_map["label"]["operator"] == "not_contains"
 
 
+def test_dump_filter_settings_round_trips_negated_filters() -> None:
+    settings = {
+        "bucket": "mb",
+        "prefix": "p",
+        "filters": [
+            {"column": "tag", "operator": "contains", "value": "base", "negate": True},
+            {"column": "notes", "operator": "missing", "negate": True},
+            {"column": "label", "operator": "is_one_of", "value": ["debug"], "negate": True},
+        ],
+    }
+
+    yaml_text = dump_filter_settings(settings)
+    parsed = parse_filter_settings(yaml_text)
+
+    assert "negate: true" in yaml_text
+    filter_map = {f["column"]: f for f in parsed["filters"]}
+    assert filter_map["tag"]["negate"] is True
+    assert filter_map["notes"]["negate"] is True
+    assert filter_map["label"]["negate"] is True
+    assert filter_map["label"]["operator"] == "is_one_of"
+    assert filter_map["label"]["value"] == ["debug"]
+
+
 def test_dump_filter_settings_omits_is_one_of_for_single_value() -> None:
     settings = {
         "bucket": "mb",

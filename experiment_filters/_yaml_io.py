@@ -39,6 +39,7 @@ class FilterSpec(TypedDict, total=False):
     operator: str
     value: Any
     use_visible_rows_only: bool
+    negate: bool
 
 
 class FilterSettings(TypedDict, total=False):
@@ -65,38 +66,49 @@ def _serialize_filter_value(spec: FilterSpec) -> str:
     """Return the YAML value fragment for one filter spec dict."""
     op = str(spec.get("operator", "contains")).lower()
     value = spec.get("value")
+    negate = bool(spec.get("negate", False))
+
+    def _inline_mapping(parts: list[str]) -> str:
+        if negate:
+            parts.append("negate: true")
+        return "{ " + ", ".join(parts) + " }"
 
     if op == "missing":
-        return "{ op: missing }"
+        return _inline_mapping(["op: missing"])
 
     if op in ("in_other_column", "partially_in_other_column"):
         target_column = str(value or "").strip()
         if not target_column:
-            return f"{{ op: {op} }}"
-        value_part = f"value: {_yaml_quote(target_column)}"
+            return _inline_mapping([f"op: {op}"])
+        parts = [f"op: {op}", f"value: {_yaml_quote(target_column)}"]
         if bool(spec.get("use_visible_rows_only", False)):
-            return f"{{ op: {op}, {value_part}, use_visible_rows_only: true }}"
-        return f"{{ op: {op}, {value_part} }}"
+            parts.append("use_visible_rows_only: true")
+        return _inline_mapping(parts)
 
     if op == "is_one_of":
+        if negate:
+            if isinstance(value, list):
+                items = ", ".join(_yaml_quote(str(v)) for v in value)
+                return _inline_mapping([f"op: {op}", f"value: [{items}]"])
+            return _inline_mapping([f"op: {op}", f"value: {_yaml_quote(str(value))}"])
         if isinstance(value, list):
             if len(value) == 1:
                 return _yaml_quote(str(value[0]))
             items = ", ".join(_yaml_quote(str(v)) for v in value)
-            return f"{{ op: {op}, value: [{items}] }}"
+            return _inline_mapping([f"op: {op}", f"value: [{items}]"])
         return _yaml_quote(str(value))
 
     if op in ("contains", "lt", "gt", "not_contains", "is_not_one_of"):
         if isinstance(value, list):
             items = ", ".join(_yaml_quote(str(v)) for v in value)
-            return f"{{ op: {op}, value: [{items}] }}"
-        return f"{{ op: {op}, value: {_yaml_quote(str(value))} }}"
+            return _inline_mapping([f"op: {op}", f"value: [{items}]"])
+        return _inline_mapping([f"op: {op}", f"value: {_yaml_quote(str(value))}"])
 
     # Unknown operators are serialized explicitly to preserve semantics.
     if isinstance(value, list):
         items = ", ".join(_yaml_quote(str(v)) for v in value)
-        return f"{{ op: {op}, value: [{items}] }}"
-    return f"{{ op: {op}, value: {_yaml_quote(str(value))} }}"
+        return _inline_mapping([f"op: {op}", f"value: [{items}]"])
+    return _inline_mapping([f"op: {op}", f"value: {_yaml_quote(str(value))}"])
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +189,8 @@ def _parse_filter_entry(entry_text: str, known_columns: set[str] | None = None) 
         spec: FilterSpec = {"column": column, "operator": op}
         if op != "missing":
             spec["value"] = value
+        if str(mapping.get("negate", "")).strip().lower() in {"1", "true", "yes", "on"}:
+            spec["negate"] = True
         if op in ("in_other_column", "partially_in_other_column") and "use_visible_rows_only" in mapping:
             spec["use_visible_rows_only"] = str(mapping["use_visible_rows_only"]).strip().lower() in {
                 "1",
