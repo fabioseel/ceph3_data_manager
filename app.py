@@ -70,6 +70,31 @@ def _write_cache(bucket: str, prefixes: list[str], rows: list, columns: list) ->
         pass
 
 
+def _discover_experiments(
+    bucket: str,
+    prefixes: list[str] | None = None,
+    region: str | None = None,
+    endpoint_url: str | None = None,
+) -> dict[str, "ExperimentConfigFiles"]:
+    listing_client = create_s3_client(region=region, endpoint_url=endpoint_url)
+    effective_prefixes = prefixes if prefixes else [""]
+    all_keys: list[str] = []
+    seen_keys: set[str] = set()
+    for prefix in effective_prefixes:
+        for key in iter_yaml_keys(listing_client, bucket=bucket, prefix=prefix):
+            if key not in seen_keys:
+                seen_keys.add(key)
+                all_keys.append(key)
+    return collect_experiment_files(all_keys)
+
+
+def _ordered_columns_from_rows(rows: list[dict[str, str]]) -> list[str]:
+    all_columns: set[str] = set()
+    for row in rows:
+        all_columns.update(str(column) for column in row.keys() if column != "run_name")
+    return ["run_name"] + sorted(all_columns)
+
+
 @dataclass
 class ExperimentConfigFiles:
     experiment_id: str
@@ -464,30 +489,29 @@ def load_experiment_rows(
     endpoint_url: str | None = None,
     progress_callback: Any | None = None,
     should_cancel: Any | None = None,
+    experiments: dict[str, ExperimentConfigFiles] | None = None,
+    initial_processed: int = 0,
+    total_override: int | None = None,
 ) -> tuple[list[dict[str, str]], list[str], str | None]:
     try:
-        listing_client = create_s3_client(region=region, endpoint_url=endpoint_url)
-        effective_prefixes = prefixes if prefixes else [""]
-        all_keys: list[str] = []
-        seen_keys: set[str] = set()
-        for prefix in effective_prefixes:
-            for key in iter_yaml_keys(listing_client, bucket=bucket, prefix=prefix):
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    all_keys.append(key)
-        experiments = collect_experiment_files(all_keys)
+        discovered = experiments if experiments is not None else _discover_experiments(
+            bucket=bucket,
+            prefixes=prefixes,
+            region=region,
+            endpoint_url=endpoint_url,
+        )
 
-        total = len(experiments)
+        total = total_override if total_override is not None else len(discovered)
         all_columns: set[str] = {"run_name", "git_hash", "last_analysis_step"}
 
         if progress_callback:
-            progress_callback("loading", 0, total)
+            progress_callback("loading", initial_processed, total)
 
-        sorted_ids = sorted(experiments.keys())
+        sorted_ids = sorted(discovered.keys())
 
         def process_one(experiment_id: str) -> tuple[str, dict[str, str], set[str]]:
             s3 = _get_thread_s3_client(region, endpoint_url)
-            files = experiments[experiment_id]
+            files = discovered[experiment_id]
 
             flat_result: list[dict[str, Any]] = []
             flat_error: list[Exception] = []
@@ -534,8 +558,8 @@ def load_experiment_rows(
             return experiment_id, row, local_columns
 
         results: dict[str, dict[str, str]] = {}
-        processed = 0
-        max_workers = min(64, total or 1)
+        processed = initial_processed
+        max_workers = min(64, len(sorted_ids) or 1)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(process_one, eid): eid for eid in sorted_ids}
             for future in as_completed(futures):
@@ -561,6 +585,60 @@ def load_experiment_rows(
         return [], [], f"Unexpected error: {error}"
 
 
+def load_experiment_rows_incremental(
+    bucket: str,
+    cached_rows: list[dict[str, str]],
+    prefixes: list[str] | None = None,
+    region: str | None = None,
+    endpoint_url: str | None = None,
+    progress_callback: Any | None = None,
+    should_cancel: Any | None = None,
+) -> tuple[list[dict[str, str]], list[str], str | None]:
+    try:
+        experiments = _discover_experiments(
+            bucket=bucket,
+            prefixes=prefixes,
+            region=region,
+            endpoint_url=endpoint_url,
+        )
+        sorted_ids = sorted(experiments.keys())
+
+        cached_by_path: dict[str, dict[str, str]] = {}
+        for row in cached_rows:
+            path = str(row.get("__s3_path", "")).strip()
+            if path and path in experiments:
+                cached_by_path[path] = row
+
+        new_experiments = {eid: experiments[eid] for eid in sorted_ids if eid not in cached_by_path}
+        new_rows, _, error = load_experiment_rows(
+            bucket=bucket,
+            prefixes=prefixes,
+            region=region,
+            endpoint_url=endpoint_url,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
+            experiments=new_experiments,
+            initial_processed=len(cached_by_path),
+            total_override=len(sorted_ids),
+        )
+        if error:
+            return [], [], error
+
+        for row in new_rows:
+            path = str(row.get("__s3_path", "")).strip()
+            if path:
+                cached_by_path[path] = row
+
+        merged_rows = [cached_by_path[eid] for eid in sorted_ids if eid in cached_by_path]
+        return merged_rows, _ordered_columns_from_rows(merged_rows), None
+    except botocore.exceptions.BotoCoreError as error:
+        return [], [], f"AWS SDK error: {error}"
+    except botocore.exceptions.ClientError as error:
+        return [], [], f"AWS client error: {error}"
+    except Exception as error:
+        return [], [], f"Unexpected error: {error}"
+
+
 def set_job_state(job_id: str, **updates: Any) -> None:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
@@ -577,7 +655,14 @@ def get_job_state(job_id: str) -> dict[str, Any] | None:
         return dict(job)
 
 
-def run_load_job(job_id: str, bucket: str, prefixes: list[str], region: str | None, endpoint_url: str | None) -> None:
+def run_load_job(
+    job_id: str,
+    bucket: str,
+    prefixes: list[str],
+    region: str | None,
+    endpoint_url: str | None,
+    force_refresh: bool = False,
+) -> None:
     def progress_callback(phase: str, processed: int, total: int) -> None:
         set_job_state(job_id, phase=phase, processed=processed, total=total)
 
@@ -585,14 +670,37 @@ def run_load_job(job_id: str, bucket: str, prefixes: list[str], region: str | No
         state = get_job_state(job_id)
         return bool(state and state.get("cancel_requested"))
 
-    rows, columns, error = load_experiment_rows(
-        bucket=bucket,
-        prefixes=prefixes,
-        region=region,
-        endpoint_url=endpoint_url,
-        progress_callback=progress_callback,
-        should_cancel=should_cancel,
-    )
+    if force_refresh:
+        rows, columns, error = load_experiment_rows(
+            bucket=bucket,
+            prefixes=prefixes,
+            region=region,
+            endpoint_url=endpoint_url,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
+        )
+    else:
+        cached = _read_cache(bucket, prefixes)
+        if cached:
+            cached_rows, _, _ = cached
+            rows, columns, error = load_experiment_rows_incremental(
+                bucket=bucket,
+                cached_rows=cached_rows,
+                prefixes=prefixes,
+                region=region,
+                endpoint_url=endpoint_url,
+                progress_callback=progress_callback,
+                should_cancel=should_cancel,
+            )
+        else:
+            rows, columns, error = load_experiment_rows(
+                bucket=bucket,
+                prefixes=prefixes,
+                region=region,
+                endpoint_url=endpoint_url,
+                progress_callback=progress_callback,
+                should_cancel=should_cancel,
+            )
 
     if error == "Cancelled":
         set_job_state(job_id, status="cancelled", error="Loading cancelled by user")
@@ -643,24 +751,6 @@ def api_load() -> Any:
 
     job_id = uuid4().hex
 
-    if not force_refresh:
-        cached = _read_cache(bucket, prefixes)
-        if cached:
-            rows, columns, cached_at = cached
-            with JOBS_LOCK:
-                JOBS[job_id] = {
-                    "status": "done",
-                    "phase": "done",
-                    "processed": len(rows),
-                    "total": len(rows),
-                    "error": None,
-                    "rows": rows,
-                    "columns": columns,
-                    "cancel_requested": False,
-                    "cached_at": cached_at,
-                }
-            return jsonify({"job_id": job_id})
-
     with JOBS_LOCK:
         JOBS[job_id] = {
             "status": "running",
@@ -674,7 +764,7 @@ def api_load() -> Any:
             "cached_at": None,
         }
 
-    worker = Thread(target=run_load_job, args=(job_id, bucket, prefixes, region, endpoint_url), daemon=True)
+    worker = Thread(target=run_load_job, args=(job_id, bucket, prefixes, region, endpoint_url, force_refresh), daemon=True)
     worker.start()
 
     return jsonify({"job_id": job_id})

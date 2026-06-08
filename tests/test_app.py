@@ -673,3 +673,121 @@ def test_load_experiment_rows_uses_short_path_as_run_name(monkeypatch: pytest.Mo
     assert "experiment_id" not in columns
     assert rows[0]["run_name"] == "run_2025-11-24-14-54-53-497055"
     assert rows[0]["trainer.epochs"] == "5"
+
+
+def test_load_experiment_rows_incremental_reuses_cached_and_fetches_only_new(monkeypatch: pytest.MonkeyPatch) -> None:
+    exp1 = app_module.ExperimentConfigFiles(experiment_id="runs/exp-1", config_key="runs/exp-1/config/config.yaml")
+    exp2 = app_module.ExperimentConfigFiles(experiment_id="runs/exp-2", config_key="runs/exp-2/config/config.yaml")
+
+    monkeypatch.setattr(app_module, "_discover_experiments", lambda **_: {"runs/exp-1": exp1, "runs/exp-2": exp2})
+
+    def fake_load_experiment_rows(
+        bucket: str,
+        prefixes: list[str] | None = None,
+        region: str | None = None,
+        endpoint_url: str | None = None,
+        progress_callback: Any | None = None,
+        should_cancel: Any | None = None,
+        experiments: dict[str, app_module.ExperimentConfigFiles] | None = None,
+        initial_processed: int = 0,
+        total_override: int | None = None,
+    ) -> tuple[list[dict[str, str]], list[str], str | None]:
+        _ = (bucket, prefixes, region, endpoint_url, progress_callback, should_cancel)
+        assert experiments is not None
+        assert sorted(experiments.keys()) == ["runs/exp-2"]
+        assert initial_processed == 1
+        assert total_override == 2
+        return [
+            {
+                "run_name": "exp-2",
+                "__s3_path": "runs/exp-2",
+                "trainer.epochs": "20",
+            }
+        ], ["run_name", "trainer.epochs"], None
+
+    monkeypatch.setattr(app_module, "load_experiment_rows", fake_load_experiment_rows)
+
+    cached_rows = [
+        {
+            "run_name": "exp-1",
+            "__s3_path": "runs/exp-1",
+            "trainer.epochs": "10",
+        }
+    ]
+
+    rows, columns, error = app_module.load_experiment_rows_incremental(
+        bucket="berens0",
+        cached_rows=cached_rows,
+        prefixes=["runs/"],
+    )
+
+    assert error is None
+    assert [row["__s3_path"] for row in rows] == ["runs/exp-1", "runs/exp-2"]
+    assert rows[0]["trainer.epochs"] == "10"
+    assert rows[1]["trainer.epochs"] == "20"
+    assert columns[0] == "run_name"
+    assert "trainer.epochs" in columns
+
+
+def test_run_load_job_uses_incremental_loading_when_cache_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    job_id = "job-incremental-cache"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "status": "running",
+            "phase": "starting",
+            "processed": 0,
+            "total": 0,
+            "error": None,
+            "rows": [],
+            "columns": [],
+            "cancel_requested": False,
+            "cached_at": None,
+        }
+
+    monkeypatch.setattr(
+        app_module,
+        "_read_cache",
+        lambda bucket, prefixes: ([{"run_name": "exp-1", "__s3_path": "runs/exp-1"}], ["run_name"], "2026-01-01T00:00:00+00:00"),
+    )
+
+    def fake_incremental(**kwargs: Any) -> tuple[list[dict[str, str]], list[str], str | None]:
+        _ = kwargs
+        return [{"run_name": "exp-1", "__s3_path": "runs/exp-1", "trainer.epochs": "10"}], ["run_name", "trainer.epochs"], None
+
+    monkeypatch.setattr(app_module, "load_experiment_rows_incremental", fake_incremental)
+
+    def fail_full_load(**kwargs: Any) -> tuple[list[dict[str, str]], list[str], str | None]:
+        raise AssertionError("full load should not be used when cache exists and refresh is false")
+
+    monkeypatch.setattr(app_module, "load_experiment_rows", fail_full_load)
+
+    wrote: dict[str, Any] = {}
+
+    def fake_write_cache(bucket: str, prefixes: list[str], rows: list, columns: list) -> None:
+        wrote["bucket"] = bucket
+        wrote["prefixes"] = prefixes
+        wrote["rows"] = rows
+        wrote["columns"] = columns
+
+    monkeypatch.setattr(app_module, "_write_cache", fake_write_cache)
+
+    try:
+        app_module.run_load_job(
+            job_id=job_id,
+            bucket="berens0",
+            prefixes=["runs/"],
+            region=None,
+            endpoint_url=None,
+            force_refresh=False,
+        )
+
+        state = app_module.get_job_state(job_id)
+        assert state is not None
+        assert state["status"] == "done"
+        assert len(state["rows"]) == 1
+        assert wrote["bucket"] == "berens0"
+        assert wrote["prefixes"] == ["runs/"]
+        assert wrote["columns"] == ["run_name", "trainer.epochs"]
+    finally:
+        with app_module.JOBS_LOCK:
+            app_module.JOBS.pop(job_id, None)
