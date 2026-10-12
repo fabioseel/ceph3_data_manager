@@ -303,6 +303,15 @@
       let editingItemPath = null;
       let collapsedGroupPaths = new Set();
       let draggedFilterItemPath = null;
+      // Virtual scrolling: only rows near the viewport are rendered into tableBody.
+      const VIRTUAL_OVERSCAN = 20;
+      let rowHeight = 41;
+      let rowHeightMeasured = false;
+      let renderedGroups = [];
+      let renderedRange = { start: -1, end: -1, count: -1 };
+      let virtualScrollFrame = null;
+      // column -> signature hash over baseRows values, used for merging identical columns.
+      let columnSignatureCache = new Map();
       const HIDDEN_COLUMNS_STORAGE_KEY = "ceph3_data_manager.hidden_columns";
 
       function getPrimaryIdColumn() {
@@ -435,6 +444,29 @@
         persistColumnPreferences();
       }
 
+      // Two independent 32-bit FNV-1a style hashes over the column's values (separated by \x00),
+      // combined into one string key. Avoids building one huge joined string per column.
+      function getColumnSignature(rows, column) {
+        const cached = columnSignatureCache.get(column);
+        if (cached !== undefined) return cached;
+
+        let h1 = 0x811c9dc5;
+        let h2 = 0x41c6ce57;
+        for (const row of rows) {
+          const value = String(row[column] ?? "");
+          for (let i = 0; i < value.length; i += 1) {
+            const code = value.charCodeAt(i);
+            h1 = Math.imul(h1 ^ code, 16777619);
+            h2 = Math.imul(h2 ^ code, 2654435761);
+          }
+          h1 = Math.imul(h1 ^ 0, 16777619);
+          h2 = Math.imul(h2 ^ 0x9e37, 2654435761);
+        }
+        const signature = `${(h1 >>> 0).toString(36)}:${(h2 >>> 0).toString(36)}`;
+        columnSignatureCache.set(column, signature);
+        return signature;
+      }
+
       // Groups columns whose values are identical across every row into a single display column.
       // Returns [{key: firstColName, columns: [col, ...]}, ...] in original column order.
       function computeColumnMergeGroups(rows, columns) {
@@ -442,10 +474,10 @@
           return columns.map((col) => ({ key: col, columns: [col] }));
         }
 
-        // Build a signature for each column: null-joined concatenation of all row values.
+        // Signature per column: hash over all row values, cached per dataset.
         const signatures = new Map();
         columns.forEach((col) => {
-          signatures.set(col, rows.map((row) => String(row[col] ?? "")).join("\x00"));
+          signatures.set(col, getColumnSignature(rows, col));
         });
 
         // Group columns that share the same signature.
@@ -2613,22 +2645,23 @@
         return { text, truncated: true };
       }
 
-      function compareColumnValues(a, b, column) {
-        const left = String(a[column] ?? "");
-        const right = String(b[column] ?? "");
+      const sortCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
-        const leftNumber = Number(left);
-        const rightNumber = Number(right);
-        const leftIsNumber = Number.isFinite(leftNumber) && left.trim() !== "";
-        const rightIsNumber = Number.isFinite(rightNumber) && right.trim() !== "";
+      function toSortKey(row, column) {
+        const text = String(row[column] ?? "");
+        const number = Number(text);
+        const isNumber = Number.isFinite(number) && text.trim() !== "";
+        return { text, number, isNumber };
+      }
 
-        if (leftIsNumber && rightIsNumber) {
-          if (leftNumber < rightNumber) return -1;
-          if (leftNumber > rightNumber) return 1;
+      function compareSortKeys(left, right) {
+        if (left.isNumber && right.isNumber) {
+          if (left.number < right.number) return -1;
+          if (left.number > right.number) return 1;
           return 0;
         }
 
-        return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+        return sortCollator.compare(left.text, right.text);
       }
 
       function sortRows() {
@@ -2639,7 +2672,10 @@
 
         const multiplier = sortState.direction === "asc" ? 1 : -1;
         const sortColumn = sortState.column;
-        currentRows.sort((a, b) => compareColumnValues(a, b, sortColumn) * multiplier);
+        // Compute each row's key once instead of inside every comparison.
+        const decorated = currentRows.map((row) => ({ row, key: toSortKey(row, sortColumn) }));
+        decorated.sort((a, b) => compareSortKeys(a.key, b.key) * multiplier);
+        currentRows = decorated.map((entry) => entry.row);
       }
 
       async function copyTextToClipboard(text) {
@@ -2692,56 +2728,120 @@
 
       function renderTable() {
         tableHead.innerHTML = "";
-        tableBody.innerHTML = "";
 
         const activeColumns = visibleColumns.length ? visibleColumns : [getPrimaryIdColumn()];
         // Merge columns that are identical across all experiments.
-        const groups = computeColumnMergeGroups(baseRows, activeColumns);
+        renderedGroups = computeColumnMergeGroups(baseRows, activeColumns);
 
         const headRow = document.createElement("tr");
-        groups.forEach((group) => headRow.appendChild(createHeaderCell(group)));
+        renderedGroups.forEach((group) => headRow.appendChild(createHeaderCell(group)));
         tableHead.appendChild(headRow);
 
-        currentRows.forEach((rowObj, index) => {
-          const row = document.createElement("tr");
-          row.dataset.rowIndex = String(index);
+        renderVisibleRows(true);
+        applyFilters();
+      }
 
-          groups.forEach((group) => {
-            const td = document.createElement("td");
-            const rawText = String(rowObj[group.key] ?? "");
-            const shortened = shortenMiddle(rawText);
-            const valueSpan = document.createElement("span");
-            valueSpan.className = "cell-value";
-            valueSpan.textContent = shortened.text;
-            const isPrimaryIdGroup = group.columns.includes(getPrimaryIdColumn());
-            if (isPrimaryIdGroup) {
-              const fullPath = String(rowObj.__s3_path || rawText);
-              valueSpan.title = fullPath;
-              valueSpan.addEventListener("dblclick", async () => {
-                const copied = await copyTextToClipboard(fullPath);
-                if (copied) {
-                  showCopyStatusBubble(valueSpan, "Copied full path");
-                } else {
-                  showCopyStatusBubble(valueSpan, "Could not copy path");
-                }
-              });
-            } else if (shortened.truncated) {
-              valueSpan.title = rawText;
-            }
-            td.appendChild(valueSpan);
-            row.appendChild(td);
-          });
+      function createBodyRow(rowObj, rowIndex, primaryIdColumn) {
+        const row = document.createElement("tr");
+        row.dataset.rowIndex = String(rowIndex);
 
-          tableBody.appendChild(row);
+        renderedGroups.forEach((group) => {
+          const td = document.createElement("td");
+          const rawText = String(rowObj[group.key] ?? "");
+          const shortened = shortenMiddle(rawText);
+          const valueSpan = document.createElement("span");
+          valueSpan.className = "cell-value";
+          valueSpan.textContent = shortened.text;
+          if (group.columns.includes(primaryIdColumn)) {
+            const fullPath = String(rowObj.__s3_path || rawText);
+            valueSpan.title = fullPath;
+            valueSpan.dataset.copyPath = fullPath;
+          } else if (shortened.truncated) {
+            valueSpan.title = rawText;
+          }
+          td.appendChild(valueSpan);
+          row.appendChild(td);
         });
 
-        applyFilters();
+        return row;
+      }
+
+      function createSpacerRow(height) {
+        const row = document.createElement("tr");
+        row.className = "virtual-spacer";
+        const td = document.createElement("td");
+        td.colSpan = Math.max(1, renderedGroups.length);
+        td.style.height = `${height}px`;
+        row.appendChild(td);
+        return row;
+      }
+
+      // Renders only the matching rows that are near the viewport, padded by spacer rows
+      // so the scrollbar still reflects the full table height.
+      function renderVisibleRows(force = false) {
+        const total = currentMatchingIndexes.length;
+        if (!total || !renderedGroups.length) {
+          tableBody.replaceChildren();
+          renderedRange = { start: -1, end: -1, count: total };
+          return;
+        }
+
+        // The page (window) scrolls, so derive the visible slice from the body's viewport offset.
+        const bodyTop = tableBody.getBoundingClientRect().top;
+        const firstVisible = Math.floor(Math.max(0, -bodyTop) / rowHeight);
+        const visibleCountEstimate = Math.ceil(window.innerHeight / rowHeight) + 1;
+        const start = Math.max(0, Math.min(total, firstVisible) - VIRTUAL_OVERSCAN);
+        const end = Math.min(total, firstVisible + visibleCountEstimate + VIRTUAL_OVERSCAN);
+
+        if (!force && start === renderedRange.start && end === renderedRange.end && total === renderedRange.count) {
+          return;
+        }
+
+        const primaryIdColumn = getPrimaryIdColumn();
+        const fragment = document.createDocumentFragment();
+        if (start > 0) {
+          fragment.appendChild(createSpacerRow(start * rowHeight));
+        }
+        for (let i = start; i < end; i += 1) {
+          const rowIndex = currentMatchingIndexes[i];
+          const rowObj = currentRows[rowIndex];
+          if (rowObj !== undefined) {
+            fragment.appendChild(createBodyRow(rowObj, rowIndex, primaryIdColumn));
+          }
+        }
+        if (end < total) {
+          fragment.appendChild(createSpacerRow((total - end) * rowHeight));
+        }
+        tableBody.replaceChildren(fragment);
+        renderedRange = { start, end, count: total };
+
+        // Measure the real row height once; rows are single-line (nowrap), so it is stable.
+        if (!rowHeightMeasured) {
+          const sample = tableBody.querySelector("tr:not(.virtual-spacer)");
+          const measured = sample ? sample.getBoundingClientRect().height : 0;
+          if (measured > 0) {
+            rowHeightMeasured = true;
+            if (Math.abs(measured - rowHeight) > 0.5) {
+              rowHeight = measured;
+              renderVisibleRows(true);
+            }
+          }
+        }
+      }
+
+      function scheduleVirtualRender() {
+        if (virtualScrollFrame !== null) return;
+        virtualScrollFrame = window.requestAnimationFrame(() => {
+          virtualScrollFrame = null;
+          renderVisibleRows();
+        });
       }
 
       async function applyFilters() {
         if (!currentRows.length) {
           currentMatchingIndexes = [];
           visibleCount.textContent = "0";
+          renderVisibleRows(true);
           return [];
         }
 
@@ -2781,21 +2881,14 @@
           return currentMatchingIndexes;
         }
 
-        currentMatchingIndexes = matchingIndexes;
+        // Keep table order (server may return indexes in any order).
+        currentMatchingIndexes = [...new Set(matchingIndexes)]
+          .filter((index) => Number.isInteger(index) && index >= 0 && index < currentRows.length)
+          .sort((a, b) => a - b);
 
-        const rows = Array.from(tableBody.querySelectorAll("tr"));
-        const matchingIndexSet = new Set(matchingIndexes);
-        let shown = 0;
-
-        rows.forEach((row) => {
-          const rowIndex = Number(row.dataset.rowIndex || "0");
-          const matches = matchingIndexSet.has(rowIndex);
-          row.style.display = matches ? "" : "none";
-          if (matches) shown += 1;
-        });
-
-        visibleCount.textContent = String(shown);
-        return matchingIndexes;
+        visibleCount.textContent = String(currentMatchingIndexes.length);
+        renderVisibleRows(true);
+        return currentMatchingIndexes;
       }
 
       function initializeData(columns, rows, datasetJobId) {
@@ -2803,6 +2896,7 @@
         currentColumns = columns;
         baseRows = [...rows];
         currentRows = [...rows];
+        columnSignatureCache = new Map();
         currentMatchingIndexes = rows.map((_, index) => index);
         applyPersistedHiddenColumns();
         rootFilterGroup = createFilterGroup("and", []);
@@ -3076,6 +3170,16 @@
           }
         });
       }
+
+      tableBody.addEventListener("dblclick", async (event) => {
+        const valueSpan = event.target.closest(".cell-value[data-copy-path]");
+        if (!valueSpan) return;
+        const copied = await copyTextToClipboard(valueSpan.dataset.copyPath);
+        showCopyStatusBubble(valueSpan, copied ? "Copied full path" : "Could not copy path");
+      });
+
+      window.addEventListener("scroll", scheduleVirtualRender, { passive: true });
+      window.addEventListener("resize", scheduleVirtualRender);
 
       document.addEventListener("click", (event) => {
         if (openHeaderMenu && !openHeaderMenu.closest(".th-wrap")?.contains(event.target)) {

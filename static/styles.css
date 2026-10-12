@@ -659,6 +659,16 @@ tbody tr:hover {
   background: #f8fcff;
 }
 
+/* Virtual scrolling placeholders for rows outside the viewport. */
+tbody tr.virtual-spacer td {
+  padding: 0;
+  border: 0;
+}
+
+tbody tr.virtual-spacer:hover {
+  background: transparent;
+}
+
 /* Hierarchical Filter Groups */
 
 .filter-group-builder {
